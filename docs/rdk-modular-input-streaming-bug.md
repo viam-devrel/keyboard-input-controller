@@ -89,7 +89,11 @@ delegates to the socket connection, and the module server installs stream
 interceptors with no timeout among them, so nothing structurally forbids
 streaming into a module.
 
-The failure is a lock-ordering deadlock in `components/input/client.go`.
+The failure is a lock-ordering livelock in `components/input/client.go`. It is
+not a hard deadlock: the parked call does eventually return `ctx.Err()`. It
+only presents as permanent because, across a module boundary, the caller is
+viam-server's `StreamEvents` handler and the context is the consumer's stream,
+which outlives everything.
 
 `RegisterControlCallback` takes `c.streamMu` and holds it, via `defer`, across
 `checkReady` (`client.go:182-183`, `:209`):
@@ -142,6 +146,48 @@ This also explains the builtin `base_remote_control` service hanging during
 startup against the same component: as an in-process consumer it calls the
 blocking path directly, with no stream of its own to mask it.
 
+### Runtime evidence
+
+Captured from a test that reproduces the stall in-package, at its timeout dump:
+
+```
+goroutine 133 [sync.Mutex.Lock, 3 minutes]:
+go.viam.com/rdk/components/input.(*client).connectStream.func1()
+	components/input/client.go:219
+go.viam.com/rdk/components/input.(*client).connectStream(...)
+	components/input/client.go:266
+
+goroutine 132 [select]:
+go.viam.com/rdk/components/input.(*client).checkReady(...)
+	components/input/client.go:148
+go.viam.com/rdk/components/input.(*client).RegisterControlCallback(...)
+	components/input/client.go:209
+```
+
+`connectStream`'s teardown is blocked acquiring `streamMu`; the registration is
+spinning in `checkReady` holding it.
+
+### A second, independent deadlock
+
+Fixing only the above surfaces a genuine hard deadlock that the old
+serialisation kept narrow. `sendConnectionStatus` (`client.go:354-355`) takes
+`c.mu.RLock()` and holds it via `defer` while calling `execCallback`, which
+takes `c.mu.RLock()` again. `sync.RWMutex` is not reentrant: once any goroutine
+is blocked in `mu.Lock()`, new readers queue behind that writer, so the inner
+`RLock` waits on a writer that waits on the outer `RLock`.
+
+```
+goroutine 8 [sync.RWMutex.RLock, 9 minutes]:
+  input.(*client).execCallback          client.go:375
+  input.(*client).sendConnectionStatus  client.go:370
+  input.(*client).connectStream         client.go:332
+goroutine 341 [sync.RWMutex.Lock, 9 minutes]:
+  input.(*client).RegisterControlCallback  client.go:226
+```
+
+This is latent on unpatched main as well. Any fix for the first issue must
+address this too, or the hang moves rather than disappears.
+
 ## Suggested fixes
 
 **1. Do not hold `streamMu` while waiting in `checkReady`.** This is the
@@ -149,18 +195,22 @@ deadlock proper. Release the mutex before waiting, or narrow it to the state
 mutation it is protecting. `connectStream`'s teardown should be able to publish
 `streamRunning = false` without contending with a waiter.
 
-**2. Do not block the server handler on subscription setup.**
-`server.go:153-160` registers synchronously before forwarding, so any stall in
-the resource's `RegisterControlCallback` stalls the whole stream with no
-diagnostic. Bounding that wait, or reporting a timeout as a stream error, would
-have turned a silent hang into an actionable message.
+**2. Snapshot before dispatching in `sendConnectionStatus`.** Collect the
+control names under the read lock, release it, then invoke the callbacks. This
+is required for fix 1 to hold under `-race`.
 
-**3. Deregister when a stream ends.** `StreamEvents` registers a `ctrlFunc` and
+**3. No server change appears necessary.** `server.go:153-160` registers
+synchronously before forwarding, which is what makes the stall invisible. But
+with the client fixed, a registration that cannot proceed returns promptly and
+`server.go:161` already propagates it as a stream error, so bounding the
+handler's wait separately would be redundant.
+
+**4. Deregister when a stream ends.** `StreamEvents` registers a `ctrlFunc` and
 never removes it when the handler returns, so a dead subscriber keeps its
-registration indefinitely. Combined with fix 4 this is what makes state
+registration indefinitely. Combined with fix 5 this is what makes state
 accumulate across reconnects.
 
-**4. Allow more than one subscriber per control.** Both the client
+**5. Allow more than one subscriber per control.** Both the client
 (`client.go:171-178`) and typical server-side implementations keep a single
 callback per control and event type, so a second consumer silently displaces
 the first, which then receives nothing. Since viam-server holds exactly one
@@ -175,3 +225,19 @@ with its slice, fixes this.
 needs current state can poll it on whatever interval it already runs, instead
 of subscribing. That is what we did in `arm-remote-control`: its movement loop
 already ticked at 10Hz and only ever read the latest value per control.
+
+## Status
+
+A proof-of-concept patch exists on branch `fix/input-client-streammu-deadlock`
+in a local RDK clone, as two commits so the two bugs can be evaluated
+separately. The files it touches are byte-identical to both `v1.7.0` and
+`upstream/main`, so it applies cleanly upstream.
+
+Verified at package level: two new tests hang before the patch and pass after,
+`go test ./components/input/... -race -count=5` is clean, and
+`./services/baseremotecontrol/...` passes.
+
+Not yet verified end to end. Nobody has run the reproduction above against a
+viam-server built with the patch. Fix 5 lives inside viam-server's single
+shared client per modular resource, so it remains possible that the hang is
+fixed and a consumer still sees nothing for that separate reason.
