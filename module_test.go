@@ -82,16 +82,13 @@ func value(t *testing.T, kb *keyboard, c input.Control) float64 {
 	return evs[c].Value
 }
 
-// key drives a key from a source directly, bypassing TriggerEvent.
-func key(t *testing.T, kb *keyboard, src source, code string, pressed bool) {
+// key drives a key through evdevKey, the evdev worker's real entry point.
+func key(t *testing.T, kb *keyboard, code string, pressed bool) {
 	t.Helper()
-	act, ok := kb.keys[code]
-	if !ok {
+	if _, ok := kb.keys[code]; !ok {
 		t.Fatalf("unknown code %q for this layout", code)
 	}
-	kb.mu.Lock()
-	defer kb.mu.Unlock()
-	kb.keyLocked(context.Background(), src, act, pressed, time.Now())
+	kb.evdevKey(context.Background(), code, pressed, time.Now())
 }
 
 func web(kb *keyboard, code string, typ input.EventType) error {
@@ -113,11 +110,11 @@ func TestMappingWASD(t *testing.T) {
 		{"Space", input.ButtonEStop, 1},
 	}
 	for _, c := range cases {
-		key(t, kb, srcEvdev, c.code, true)
+		key(t, kb, c.code, true)
 		if got := value(t, kb, c.ctrl); got != c.want {
 			t.Errorf("%s pressed: %s = %v, want %v", c.code, c.ctrl, got, c.want)
 		}
-		key(t, kb, srcEvdev, c.code, false)
+		key(t, kb, c.code, false)
 		if got := value(t, kb, c.ctrl); got != 0 {
 			t.Errorf("%s released: %s = %v, want 0", c.code, c.ctrl, got)
 		}
@@ -138,22 +135,25 @@ func TestMappingArrows(t *testing.T) {
 		{"Space", input.ButtonEStop, 1},
 	}
 	for _, c := range cases {
-		key(t, kb, srcEvdev, c.code, true)
+		key(t, kb, c.code, true)
 		if got := value(t, kb, c.ctrl); got != c.want {
 			t.Errorf("%s pressed: %s = %v, want %v", c.code, c.ctrl, got, c.want)
 		}
-		key(t, kb, srcEvdev, c.code, false)
+		key(t, kb, c.code, false)
+		if got := value(t, kb, c.ctrl); got != 0 {
+			t.Errorf("%s released: %s = %v, want 0", c.code, c.ctrl, got)
+		}
 	}
 }
 
 func TestOppositeKeysCancel(t *testing.T) {
 	kb, got := newTestKB(t, Config{})
-	key(t, kb, srcEvdev, "KeyW", true)
-	key(t, kb, srcEvdev, "KeyS", true)
+	key(t, kb, "KeyW", true)
+	key(t, kb, "KeyS", true)
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
 		t.Fatalf("both held: Hat0Y = %v, want 0", v)
 	}
-	key(t, kb, srcEvdev, "KeyW", false)
+	key(t, kb, "KeyW", false)
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 1 {
 		t.Fatalf("only S held: Hat0Y = %v, want 1", v)
 	}
@@ -166,9 +166,9 @@ func TestOppositeKeysCancel(t *testing.T) {
 
 func TestRepeatPressEmitsNothing(t *testing.T) {
 	kb, got := newTestKB(t, Config{})
-	key(t, kb, srcEvdev, "KeyW", true)
+	key(t, kb, "KeyW", true)
 	n := len(*got)
-	key(t, kb, srcEvdev, "KeyW", true)
+	key(t, kb, "KeyW", true)
 	if len(*got) != n {
 		t.Fatalf("repeat press emitted %d events", len(*got)-n)
 	}
@@ -176,13 +176,17 @@ func TestRepeatPressEmitsNothing(t *testing.T) {
 
 func TestTwoSourcesUnion(t *testing.T) {
 	kb, _ := newTestKB(t, Config{})
-	key(t, kb, srcEvdev, "KeyW", true)
-	key(t, kb, srcWeb, "KeyW", true)
-	key(t, kb, srcWeb, "KeyW", false)
+	key(t, kb, "KeyW", true)
+	if err := web(kb, "KeyW", input.ButtonPress); err != nil {
+		t.Fatal(err)
+	}
+	if err := web(kb, "KeyW", input.ButtonRelease); err != nil {
+		t.Fatal(err)
+	}
 	if v := value(t, kb, input.AbsoluteHat0Y); v != -1 {
 		t.Fatalf("evdev still holds W: Hat0Y = %v, want -1", v)
 	}
-	key(t, kb, srcEvdev, "KeyW", false)
+	key(t, kb, "KeyW", false)
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
 		t.Fatalf("both released: Hat0Y = %v, want 0", v)
 	}
@@ -190,10 +194,12 @@ func TestTwoSourcesUnion(t *testing.T) {
 
 func TestEStopClearsAllAndEmitsPress(t *testing.T) {
 	kb, got := newTestKB(t, Config{})
-	key(t, kb, srcEvdev, "KeyW", true)
-	key(t, kb, srcWeb, "KeyQ", true)
+	key(t, kb, "KeyW", true)
+	if err := web(kb, "KeyQ", input.ButtonPress); err != nil {
+		t.Fatal(err)
+	}
 	*got = nil
-	key(t, kb, srcEvdev, "Space", true)
+	key(t, kb, "Space", true)
 	want := map[input.Control]input.Event{
 		input.AbsoluteHat0Y: {Event: input.PositionChangeAbs, Value: 0},
 		input.ButtonLT:      {Event: input.ButtonRelease, Value: 0},
@@ -213,7 +219,7 @@ func TestEStopClearsAllAndEmitsPress(t *testing.T) {
 	if len(want) != 0 {
 		t.Errorf("missing events for %v", want)
 	}
-	key(t, kb, srcEvdev, "Space", false)
+	key(t, kb, "Space", false)
 	if v := value(t, kb, input.ButtonEStop); v != 0 {
 		t.Fatalf("EStop after release = %v, want 0", v)
 	}
@@ -221,7 +227,9 @@ func TestEStopClearsAllAndEmitsPress(t *testing.T) {
 
 func TestConnectSweepReemitsHeld(t *testing.T) {
 	kb, got := newTestKB(t, Config{})
-	key(t, kb, srcWeb, "KeyW", true)
+	if err := web(kb, "KeyW", input.ButtonPress); err != nil {
+		t.Fatal(err)
+	}
 	*got = nil
 	kb.deviceConnected(context.Background())
 	sawConnect, sawReemit := false, false
@@ -236,7 +244,9 @@ func TestConnectSweepReemitsHeld(t *testing.T) {
 	if !sawConnect || !sawReemit {
 		t.Fatalf("connect=%v reemit=%v, want both", sawConnect, sawReemit)
 	}
-	key(t, kb, srcWeb, "KeyW", false)
+	if err := web(kb, "KeyW", input.ButtonRelease); err != nil {
+		t.Fatal(err)
+	}
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
 		t.Fatalf("after release Hat0Y = %v, want 0", v)
 	}
@@ -244,8 +254,10 @@ func TestConnectSweepReemitsHeld(t *testing.T) {
 
 func TestDeviceLostReleasesEvdevKeys(t *testing.T) {
 	kb, got := newTestKB(t, Config{})
-	key(t, kb, srcEvdev, "KeyW", true)
-	key(t, kb, srcWeb, "KeyQ", true)
+	key(t, kb, "KeyW", true)
+	if err := web(kb, "KeyQ", input.ButtonPress); err != nil {
+		t.Fatal(err)
+	}
 	*got = nil
 	kb.deviceLost(context.Background())
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
@@ -310,10 +322,15 @@ func TestHoldIsKeepaliveOnly(t *testing.T) {
 		t.Fatal("Hold for a key never pressed created a press")
 	}
 	_ = web(kb, "KeyW", input.ButtonPress)
+	kb.mu.Lock()
 	before := kb.held[srcWeb][actForward]
+	kb.mu.Unlock()
 	time.Sleep(2 * time.Millisecond)
 	_ = web(kb, "KeyW", input.ButtonHold)
-	if !kb.held[srcWeb][actForward].After(before) {
+	kb.mu.Lock()
+	after := kb.held[srcWeb][actForward]
+	kb.mu.Unlock()
+	if !after.After(before) {
 		t.Fatal("Hold did not refresh timestamp")
 	}
 }
@@ -367,16 +384,36 @@ func TestTriggerEventIgnoresSkewedClientClock(t *testing.T) {
 // identical either way, since the first Space press already cleared it).
 func TestRepeatEStopPressDoesNotReclear(t *testing.T) {
 	kb, got := newTestKB(t, Config{})
-	key(t, kb, srcEvdev, "KeyW", true)
-	key(t, kb, srcEvdev, "Space", true) // first EStop press: clears W, holds EStop
-	key(t, kb, srcEvdev, "KeyW", true)  // W held again while EStop is still down
+	key(t, kb, "KeyW", true)
+	key(t, kb, "Space", true) // first EStop press: clears W, holds EStop
+	key(t, kb, "KeyW", true)  // W held again while EStop is still down
 	*got = nil
-	key(t, kb, srcEvdev, "Space", true) // repeat EStop press: refresh only
+	key(t, kb, "Space", true) // repeat EStop press: refresh only
 	if len(*got) != 0 {
 		t.Fatalf("repeat EStop press emitted %d events, want 0: %+v", len(*got), *got)
 	}
-	if _, held := kb.held[srcEvdev][actForward]; !held {
+	kb.mu.Lock()
+	_, held := kb.held[srcEvdev][actForward]
+	kb.mu.Unlock()
+	if !held {
 		t.Fatal("repeat EStop press incorrectly cleared W")
+	}
+}
+
+// waitForValue polls c's value every 2ms until it equals want or a ~2s
+// deadline passes, failing the test on timeout. Used to observe a live
+// background goroutine's effect without a fixed sleep.
+func waitForValue(t *testing.T, kb *keyboard, c input.Control, want float64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if v := value(t, kb, c); v == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not reach %v within deadline", c, want)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -391,16 +428,38 @@ func TestWatchdogGoroutineExpiresHeldKey(t *testing.T) {
 	if v := value(t, kb, input.AbsoluteHat0Y); v != -1 {
 		t.Fatalf("press did not register: Hat0Y = %v", v)
 	}
-	time.Sleep(100 * time.Millisecond) // several watchdog ticks at timeout/2
-	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
-		t.Fatalf("watchdog goroutine did not expire held key: Hat0Y = %v, want 0", v)
+	waitForValue(t, kb, input.AbsoluteHat0Y, 0) // watchdog goroutine must expire it
+}
+
+// TestDefaultHoldTimeoutStartsWatchdog exercises the actual production
+// default (no HoldTimeoutMs in config) end to end: newTestKB forces the
+// timeout to 0 for every other test to keep the watchdog off, so nothing
+// else in this suite constructs with the real default and confirms the
+// watchdog goroutine is actually running under it.
+func TestDefaultHoldTimeoutStartsWatchdog(t *testing.T) {
+	ctx := context.Background()
+	k, err := NewInput(ctx, input.Named("kb"), &Config{}, logging.NewTestLogger(t))
+	if err != nil {
+		t.Fatal(err)
 	}
+	kb := k.(*keyboard)
+	t.Cleanup(func() { _ = kb.Close(ctx) })
+	if kb.holdTimeout != defaultHoldTimeout {
+		t.Fatalf("holdTimeout = %v, want default %v", kb.holdTimeout, defaultHoldTimeout)
+	}
+	if err := kb.TriggerEvent(ctx, input.Event{Control: "KeyW", Event: input.ButtonPress}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if v := value(t, kb, input.AbsoluteHat0Y); v != -1 {
+		t.Fatalf("press did not register: Hat0Y = %v", v)
+	}
+	waitForValue(t, kb, input.AbsoluteHat0Y, 0) // watchdog must fire under the real default timeout
 }
 
 func TestWatchdogExpiresWebOnly(t *testing.T) {
 	kb, _ := newTestKB(t, Config{HoldTimeoutMs: intp(60000)})
 	_ = web(kb, "KeyW", input.ButtonPress)
-	key(t, kb, srcEvdev, "KeyQ", true)
+	key(t, kb, "KeyQ", true)
 	kb.mu.Lock()
 	kb.expireWebLocked(context.Background(), time.Now().Add(61*time.Second))
 	kb.mu.Unlock()
@@ -418,8 +477,8 @@ func TestButtonChangeRegistersBoth(t *testing.T) {
 	_ = kb.RegisterControlCallback(context.Background(), input.ButtonLT,
 		[]input.EventType{input.ButtonChange},
 		func(_ context.Context, ev input.Event) { seen = append(seen, ev.Event) }, nil)
-	key(t, kb, srcEvdev, "KeyQ", true)
-	key(t, kb, srcEvdev, "KeyQ", false)
+	key(t, kb, "KeyQ", true)
+	key(t, kb, "KeyQ", false)
 	if len(seen) != 2 || seen[0] != input.ButtonPress || seen[1] != input.ButtonRelease {
 		t.Fatalf("ButtonChange saw %v", seen)
 	}

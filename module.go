@@ -1,5 +1,11 @@
 // Package keyboard implements a Viam input controller driven by keyboard keys,
 // from a local evdev device (Linux) or from a browser via TriggerEvent.
+//
+// A single mutex guards all controller state and is held for the duration of
+// callback dispatch. Callbacks registered via RegisterControlCallback must
+// not call Events, RegisterControlCallback, TriggerEvent, or Close on this
+// controller: the mutex is not reentrant, so doing so deadlocks the calling
+// goroutine.
 package keyboard
 
 import (
@@ -81,14 +87,20 @@ var layouts = map[string]map[string]action{
 	},
 }
 
-// buttonControls are the actions that map 1:1 to a button control.
-// Hat axes are synthesized from the forward/back and left/right pairs.
-var buttonControls = map[action]input.Control{
-	actZDown:     input.ButtonLT,
-	actZUp:       input.ButtonRT,
-	actGripClose: input.ButtonWest,
-	actGripOpen:  input.ButtonEast,
-	actEStop:     input.ButtonEStop,
+// buttonControls are the actions that map 1:1 to a button control, in a
+// fixed emission order. Hat axes are synthesized from the forward/back and
+// left/right pairs. The order matters: recomputeLocked emits in this order
+// so that on an EStop clear-all, ButtonEStop's press is always emitted last,
+// after every other button's release and the hat axes have gone out.
+var buttonControls = []struct {
+	act  action
+	ctrl input.Control
+}{
+	{actZDown, input.ButtonLT},
+	{actZUp, input.ButtonRT},
+	{actGripClose, input.ButtonWest},
+	{actGripOpen, input.ButtonEast},
+	{actEStop, input.ButtonEStop},
 }
 
 // controls is the fixed list returned by Controls(), regardless of layout.
@@ -161,10 +173,7 @@ func NewInput(ctx context.Context, name resource.Name, conf *Config, logger logg
 		k.held[s] = map[action]time.Time{}
 	}
 
-	k.mu.Lock()
-	k.sweepLocked(ctx, input.Connect)
-	k.recomputeLocked(ctx, time.Now())
-	k.mu.Unlock()
+	k.deviceConnected(ctx)
 
 	var workers []func(context.Context)
 	if timeout > 0 {
@@ -183,8 +192,14 @@ func NewInput(ctx context.Context, name resource.Name, conf *Config, logger logg
 
 // keyLocked applies a press or release of act from src and recomputes.
 // A repeat press from the same source only refreshes the timestamp.
+// eventTime is used only as the emitted Event.Time passed to
+// recomputeLocked; it is deliberately NOT stored in k.held. Held-key
+// timestamps always use time.Now(), the server's receipt clock, because the
+// watchdog must never depend on a caller-supplied time (see docs/SPEC.md,
+// "Held-key timestamps use the server clock only"). Do not "simplify" this
+// by storing eventTime instead.
 // Caller holds k.mu.
-func (k *keyboard) keyLocked(ctx context.Context, src source, act action, pressed bool, at time.Time) {
+func (k *keyboard) keyLocked(ctx context.Context, src source, act action, pressed bool, eventTime time.Time) {
 	if pressed {
 		if _, already := k.held[src][act]; already {
 			k.held[src][act] = time.Now()
@@ -199,10 +214,11 @@ func (k *keyboard) keyLocked(ctx context.Context, src source, act action, presse
 	} else {
 		delete(k.held[src], act)
 	}
-	k.recomputeLocked(ctx, at)
+	k.recomputeLocked(ctx, eventTime)
 }
 
-func (k *keyboard) isHeld(act action) bool {
+// isHeldLocked reports whether act is held by any source. Caller holds k.mu.
+func (k *keyboard) isHeldLocked(act action) bool {
 	for s := range k.held {
 		if _, ok := k.held[s][act]; ok {
 			return true
@@ -211,7 +227,7 @@ func (k *keyboard) isHeld(act action) bool {
 	return false
 }
 
-func b2f(b bool) float64 {
+func boolToFloat(b bool) float64 {
 	if b {
 		return 1
 	}
@@ -219,15 +235,21 @@ func b2f(b bool) float64 {
 }
 
 // recomputeLocked derives every control from the held sets and emits only
-// the ones whose value differs from lastEvents. Caller holds k.mu.
+// the ones whose value differs from lastEvents, in a fixed order (hat axes,
+// then buttonControls in its declared order) so that dispatch is
+// deterministic. In particular, on an EStop clear-all, ButtonEStop is always
+// the last event of the recompute, after both axes are zeroed and every
+// other button's release goes out. Caller holds k.mu.
 func (k *keyboard) recomputeLocked(ctx context.Context, at time.Time) {
-	k.setLocked(ctx, input.AbsoluteHat0Y, b2f(k.isHeld(actBack))-b2f(k.isHeld(actForward)), at)
-	k.setLocked(ctx, input.AbsoluteHat0X, b2f(k.isHeld(actRight))-b2f(k.isHeld(actLeft)), at)
-	for act, ctrl := range buttonControls {
-		k.setLocked(ctx, ctrl, b2f(k.isHeld(act)), at)
+	k.setLocked(ctx, input.AbsoluteHat0Y, boolToFloat(k.isHeldLocked(actBack))-boolToFloat(k.isHeldLocked(actForward)), at)
+	k.setLocked(ctx, input.AbsoluteHat0X, boolToFloat(k.isHeldLocked(actRight))-boolToFloat(k.isHeldLocked(actLeft)), at)
+	for _, bc := range buttonControls {
+		k.setLocked(ctx, bc.ctrl, boolToFloat(k.isHeldLocked(bc.act)), at)
 	}
 }
 
+// setLocked records val for ctrl and emits an event only if it differs from
+// the last value recorded for ctrl. Caller holds k.mu.
 func (k *keyboard) setLocked(ctx context.Context, ctrl input.Control, val float64, at time.Time) {
 	if last, ok := k.lastEvents[ctrl]; ok && last.Value == val {
 		return
@@ -267,6 +289,8 @@ func (k *keyboard) sweepLocked(ctx context.Context, typ input.EventType) {
 }
 
 // deviceConnected is called by the evdev worker after opening the device.
+// No closed guard: Close stops the evdev worker (joining it) before its own
+// final clear runs, so this cannot race an emit-after-Close.
 func (k *keyboard) deviceConnected(ctx context.Context) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -274,7 +298,9 @@ func (k *keyboard) deviceConnected(ctx context.Context) {
 	k.recomputeLocked(ctx, time.Now())
 }
 
-// deviceLost is called by the evdev worker when the device goes away.
+// deviceLost is called by the evdev worker when the device goes away. No
+// closed guard: Close stops the evdev worker (joining it) before its own
+// final clear runs, so this cannot race an emit-after-Close.
 func (k *keyboard) deviceLost(ctx context.Context) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -285,12 +311,14 @@ func (k *keyboard) deviceLost(ctx context.Context) {
 }
 
 // evdevKey is the evdev worker's entry point. code is a browser
-// KeyboardEvent.code name; unmapped codes are ignored.
-func (k *keyboard) evdevKey(ctx context.Context, code string, pressed bool, at time.Time) {
+// KeyboardEvent.code name; unmapped codes are ignored. No closed guard:
+// Close stops the evdev worker (joining it) before its own final clear
+// runs, so this cannot race an emit-after-Close.
+func (k *keyboard) evdevKey(ctx context.Context, code string, pressed bool, eventTime time.Time) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if act, ok := k.keys[code]; ok {
-		k.keyLocked(ctx, srcEvdev, act, pressed, at)
+		k.keyLocked(ctx, srcEvdev, act, pressed, eventTime)
 	}
 }
 
@@ -311,6 +339,10 @@ func (k *keyboard) Events(context.Context, map[string]interface{}) (map[input.Co
 }
 
 // RegisterControlCallback mirrors webgamepad: ButtonChange expands to Press+Release.
+//
+// f runs synchronously on the dispatching goroutine while k.mu is held. f
+// must not call Events, RegisterControlCallback, TriggerEvent, or Close on
+// this controller, or it will deadlock on the non-reentrant mutex.
 func (k *keyboard) RegisterControlCallback(
 	_ context.Context, control input.Control, triggers []input.EventType,
 	f input.ControlFunction, _ map[string]interface{},
@@ -345,7 +377,7 @@ func (k *keyboard) TriggerEvent(ctx context.Context, ev input.Event, _ map[strin
 		return fmt.Errorf("unknown key %q for this layout", ev.Control)
 	}
 	at := ev.Time
-	if at.IsZero() || at.Unix() <= 0 {
+	if at.Unix() <= 0 {
 		at = time.Now()
 	}
 	switch ev.Event {
