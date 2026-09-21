@@ -32,3 +32,8 @@ bin
 # Viam reload files
 .VIAM_RELOAD_ARCHIVE.tar.gz
 reload-*/
+
+# macOS and editor artifacts
+.DS_Store
+.idea/
+.vscode/
