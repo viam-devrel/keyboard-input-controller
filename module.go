@@ -42,6 +42,11 @@ type Config struct {
 
 const defaultHoldTimeout = 500 * time.Millisecond
 
+// minHoldTimeoutMs is the smallest positive hold_timeout_ms Validate
+// accepts. Anything smaller (e.g. 1) produces a sub-millisecond watchdog
+// ticker, a hot loop. 0 is still allowed: it disables the watchdog.
+const minHoldTimeoutMs = 50
+
 // Validate checks attributes. No dependencies.
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.Layout != "" {
@@ -50,9 +55,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 				fmt.Errorf("layout must be \"wasd\" or \"arrows\", got %q", cfg.Layout))
 		}
 	}
-	if cfg.HoldTimeoutMs != nil && *cfg.HoldTimeoutMs < 0 {
+	if cfg.HoldTimeoutMs != nil && *cfg.HoldTimeoutMs != 0 && *cfg.HoldTimeoutMs < minHoldTimeoutMs {
 		return nil, nil, resource.NewConfigValidationError(path,
-			errors.New("hold_timeout_ms must be >= 0"))
+			fmt.Errorf("hold_timeout_ms must be 0 (disabled) or >= %d", minHoldTimeoutMs))
 	}
 	return nil, nil, nil
 }
@@ -269,14 +274,29 @@ func (k *keyboard) setLocked(ctx context.Context, ctrl input.Control, val float6
 }
 
 // emitLocked records the event and fires callbacks. Caller holds k.mu.
+//
+// Callbacks run synchronously while k.mu is held (see the package doc), so a
+// callback that never returns wedges every future emit behind this mutex and
+// then deadlocks Close. The RDK installs a callback for a streaming
+// subscriber that blocks sending on a 1024-slot channel and only escapes via
+// its context; that context is this worker's, which is cancelled only at
+// Close. A subscriber that connects and then vanishes (e.g. the CONTROL tab
+// closes) would otherwise leave a dead callback wired up forever. Bounding
+// ctx here turns that permanent wedge into a single dropped event: a live
+// subscriber's channel send is effectively instant, a dead one times out.
+// Scoped to this call (not shared across recomputeLocked's several emits) so
+// each timer is created and cancelled here, with nothing to leak.
 func (k *keyboard) emitLocked(ctx context.Context, ev input.Event) {
+	cctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+
 	k.lastEvents[ev.Control] = ev
 	cbs := k.callbacks[ev.Control]
 	if f := cbs[ev.Event]; f != nil {
-		f(ctx, ev)
+		f(cctx, ev)
 	}
 	if f := cbs[input.AllEvents]; f != nil {
-		f(ctx, ev)
+		f(cctx, ev)
 	}
 }
 

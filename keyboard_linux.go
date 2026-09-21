@@ -36,7 +36,7 @@ func (k *keyboard) deviceWorker(devFile string, grab bool) (func(context.Context
 			dev, err := evdev.OpenFile(devFile)
 			if err != nil {
 				if err.Error() != lastErr {
-					k.logger.Warnw("cannot open keyboard device; retrying", "dev_file", devFile, "err", err)
+					k.logger.Errorw("cannot open keyboard device; retrying", "dev_file", devFile, "err", err)
 					lastErr = err.Error()
 				}
 				if !utils.SelectContextOrWait(ctx, reconnectDelay) {

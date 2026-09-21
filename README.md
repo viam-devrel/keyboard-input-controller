@@ -29,7 +29,7 @@ Design details: `docs/SPEC.md`.
 | `layout` | `"wasd"` or `"arrows"` | `"wasd"` | Key layout. |
 | `dev_file` | string | unset | evdev device to read. Leave unset for web-only. Linux only. |
 | `grab` | bool | `false` | Take exclusive access so keystrokes do not also reach the console. Can lock you out of a tty on that keyboard. |
-| `hold_timeout_ms` | int | `500` | Web-held keys auto-release if no keepalive arrives within this window. `0` disables. |
+| `hold_timeout_ms` | int | `500` | Web-held keys auto-release if no keepalive arrives within this window. `0` disables; otherwise must be >= 50. |
 
 ### Controls
 
@@ -58,6 +58,10 @@ or run `evtest` and pick the device that reports your keypresses.
 viam-server needs read/write on it. Add its user to the `input` group or
 add a udev rule. The module reconnects automatically if the keyboard is
 unplugged, and zeroes every control the keyboard was holding.
+
+If you see `cannot open keyboard device` in the machine's LOGS, `dev_file`
+is wrong or viam-server lacks permission on it; the component otherwise
+builds and shows green while silently emitting nothing.
 
 ### Web keyboard
 

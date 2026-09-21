@@ -24,6 +24,8 @@ func TestValidate(t *testing.T) {
 		{"bad layout", Config{Layout: "dvorak"}, true},
 		{"zero timeout", Config{HoldTimeoutMs: intp(0)}, false},
 		{"negative timeout", Config{HoldTimeoutMs: intp(-1)}, true},
+		{"too-small positive timeout", Config{HoldTimeoutMs: intp(1)}, true},
+		{"minimum positive timeout", Config{HoldTimeoutMs: intp(50)}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

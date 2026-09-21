@@ -45,10 +45,10 @@ keyboard plugged into the machine (Linux evdev) or from a browser over the
 | `layout` | `"wasd"` \| `"arrows"` | `"wasd"` | Which key layout maps to controls. |
 | `dev_file` | string | unset | Linux evdev device to read. Unset means web-only. Constructor errors on non-Linux if set. |
 | `grab` | bool | `false` | Take exclusive access to the device (`EVIOCGRAB`) so keystrokes do not also reach the console. Off by default because it can lock you out of a tty on that keyboard. |
-| `hold_timeout_ms` | int | `500` | Keys held via `TriggerEvent` are auto-released if no keepalive arrives in this window. `0` disables the watchdog entirely. Does not apply to evdev keys, which have real release events. |
+| `hold_timeout_ms` | int | `500` | Keys held via `TriggerEvent` are auto-released if no keepalive arrives in this window. `0` disables the watchdog entirely. Otherwise must be >= 50; smaller values would drive a sub-millisecond watchdog ticker. Does not apply to evdev keys, which have real release events. |
 
-`Validate` rejects unknown `layout` values and negative timeouts. No
-dependencies.
+`Validate` rejects unknown `layout` values, negative timeouts, and positive
+timeouts below 50ms. No dependencies.
 
 ## Controls emitted
 
