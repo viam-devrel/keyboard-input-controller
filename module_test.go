@@ -342,6 +342,61 @@ func TestTriggerEventUsesServerClock(t *testing.T) {
 	}
 }
 
+// TestTriggerEventIgnoresSkewedClientClock guards against using the inbound
+// Time to seed k.held: the browser's clock is never trusted for safety, so
+// even a valid (non-zero, non-epoch) but skewed client timestamp must not
+// affect when a press expires. Only the server's receipt time may.
+func TestTriggerEventIgnoresSkewedClientClock(t *testing.T) {
+	kb, _ := newTestKB(t, Config{HoldTimeoutMs: intp(60000)})
+	skewed := input.Event{Control: "KeyW", Event: input.ButtonPress, Time: time.Now().Add(-10 * time.Minute)}
+	if err := kb.TriggerEvent(context.Background(), skewed, nil); err != nil {
+		t.Fatal(err)
+	}
+	kb.mu.Lock()
+	kb.expireWebLocked(context.Background(), time.Now())
+	kb.mu.Unlock()
+	if v := value(t, kb, input.AbsoluteHat0Y); v != -1 {
+		t.Fatalf("skewed-but-valid client time expired press early: Hat0Y = %v, want -1", v)
+	}
+}
+
+// TestRepeatEStopPressDoesNotReclear checks that a repeat press of an
+// already-held Space is refresh-only and does not re-run the clear-all: W is
+// re-pressed between the two Space presses so an accidental extra clear
+// becomes observable (a bare repeat with nothing else held would look
+// identical either way, since the first Space press already cleared it).
+func TestRepeatEStopPressDoesNotReclear(t *testing.T) {
+	kb, got := newTestKB(t, Config{})
+	key(t, kb, srcEvdev, "KeyW", true)
+	key(t, kb, srcEvdev, "Space", true) // first EStop press: clears W, holds EStop
+	key(t, kb, srcEvdev, "KeyW", true)  // W held again while EStop is still down
+	*got = nil
+	key(t, kb, srcEvdev, "Space", true) // repeat EStop press: refresh only
+	if len(*got) != 0 {
+		t.Fatalf("repeat EStop press emitted %d events, want 0: %+v", len(*got), *got)
+	}
+	if _, held := kb.held[srcEvdev][actForward]; !held {
+		t.Fatal("repeat EStop press incorrectly cleared W")
+	}
+}
+
+// TestWatchdogGoroutineExpiresHeldKey exercises the live watchdog goroutine
+// (not expireWebLocked driven directly) to confirm it is actually wired up
+// and ticking.
+func TestWatchdogGoroutineExpiresHeldKey(t *testing.T) {
+	kb, _ := newTestKB(t, Config{HoldTimeoutMs: intp(20)})
+	if err := web(kb, "KeyW", input.ButtonPress); err != nil {
+		t.Fatal(err)
+	}
+	if v := value(t, kb, input.AbsoluteHat0Y); v != -1 {
+		t.Fatalf("press did not register: Hat0Y = %v", v)
+	}
+	time.Sleep(100 * time.Millisecond) // several watchdog ticks at timeout/2
+	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
+		t.Fatalf("watchdog goroutine did not expire held key: Hat0Y = %v, want 0", v)
+	}
+}
+
 func TestWatchdogExpiresWebOnly(t *testing.T) {
 	kb, _ := newTestKB(t, Config{HoldTimeoutMs: intp(60000)})
 	_ = web(kb, "KeyW", input.ButtonPress)
@@ -372,9 +427,30 @@ func TestButtonChangeRegistersBoth(t *testing.T) {
 
 func TestControlsFixed(t *testing.T) {
 	kb, _ := newTestKB(t, Config{Layout: "arrows"})
-	cs, _ := kb.Controls(context.Background(), nil)
-	if len(cs) != 7 {
-		t.Fatalf("Controls() = %v, want 7", cs)
+	cs, err := kb.Controls(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []input.Control{
+		input.AbsoluteHat0X, input.AbsoluteHat0Y,
+		input.ButtonLT, input.ButtonRT, input.ButtonWest, input.ButtonEast, input.ButtonEStop,
+	}
+	if len(cs) != len(want) {
+		t.Fatalf("Controls() = %v, want %v", cs, want)
+	}
+	for i, c := range want {
+		if cs[i] != c {
+			t.Fatalf("Controls()[%d] = %v, want %v", i, cs[i], c)
+		}
+	}
+	// Mutating the returned slice must not affect a subsequent call.
+	cs[0] = "corrupted"
+	cs2, err := kb.Controls(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs2[0] != input.AbsoluteHat0X {
+		t.Fatalf("mutating the returned slice affected a later call: %v", cs2)
 	}
 }
 
