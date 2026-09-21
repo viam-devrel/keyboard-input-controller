@@ -1,144 +1,422 @@
+// Package keyboard implements a Viam input controller driven by keyboard keys,
+// from a local evdev device (Linux) or from a browser via TriggerEvent.
 package keyboard
 
 import (
-  input "go.viam.com/rdk/components/input"
-  "context"
-"sync"
-"time"
-pb "go.viam.com/api/component/inputcontroller/v1"
-"go.viam.com/utils"
-"go.viam.com/utils/protoutils"
-"go.viam.com/utils/rpc"
-"google.golang.org/protobuf/types/known/structpb"
-"google.golang.org/protobuf/types/known/timestamppb"
-"go.viam.com/rdk/logging"
-rprotoutils "go.viam.com/rdk/protoutils"
-"go.viam.com/rdk/resource"
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"go.viam.com/rdk/components/input"
+	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/resource"
+	"go.viam.com/utils"
 )
 
-var (
-	Input = resource.NewModel("devrel", "keyboard", "input")
-	errUnimplemented = errors.New("unimplemented")
-)
+// Input is the model triplet for this component.
+var Input = resource.NewModel("devrel", "keyboard", "input")
 
 func init() {
 	resource.RegisterComponent(input.API, Input,
-		resource.Registration[input.Controller, Config]{
+		resource.Registration[input.Controller, *Config]{
 			Constructor: newKeyboardInput,
 		},
 	)
 }
 
+// Config is the component's JSON attributes. See docs/SPEC.md "Configuration".
 type Config struct {
-	/*
-	Put config attributes here. There should be public/exported fields
-	with a `json` parameter at the end of each attribute.
+	Layout        string `json:"layout,omitempty"`
+	DevFile       string `json:"dev_file,omitempty"`
+	Grab          bool   `json:"grab,omitempty"`
+	HoldTimeoutMs *int   `json:"hold_timeout_ms,omitempty"` // pointer: 0 disables, nil means default
+}
 
-	Example config struct:
-		type Config struct {
-			Pin   string `json:"pin"`
-			Board string `json:"board"`
-			MinDeg *float64 `json:"min_angle_deg,omitempty"`
+const defaultHoldTimeout = 500 * time.Millisecond
+
+// Validate checks attributes. No dependencies.
+func (cfg *Config) Validate(path string) ([]string, []string, error) {
+	if cfg.Layout != "" {
+		if _, ok := layouts[cfg.Layout]; !ok {
+			return nil, nil, resource.NewConfigValidationError(path,
+				fmt.Errorf("layout must be \"wasd\" or \"arrows\", got %q", cfg.Layout))
 		}
-
-	If your model does not need a config, replace Config in the init
-	function with resource.NoNativeConfig
-	*/
+	}
+	if cfg.HoldTimeoutMs != nil && *cfg.HoldTimeoutMs < 0 {
+		return nil, nil, resource.NewConfigValidationError(path,
+			errors.New("hold_timeout_ms must be >= 0"))
+	}
+	return nil, nil, nil
 }
 
-// Validate ensures all parts of the config are valid and important fields exist.
-// Returns three values:
-//   1. Required dependencies: other resources that must exist for this resource to work.
-//   2. Optional dependencies: other resources that may exist but are not required.
-//   3. An error if any Config fields are missing or invalid.
-//
-// The `path` parameter indicates
-// where this resource appears in the machine's JSON configuration
-// (for example, "components.0"). You can use it in error messages
-// to indicate which resource has a problem.
-//
-// Note: Validate receives a copy of the config; mutations to it will do
-// nothing. Fill in any default values in your resource's constructor function
-// instead.
-func (cfg Config) Validate(path string) ([]string, []string, error) {
-	// Add config validation code here
-	 return nil, nil, nil
+// action is what a key means. Controls are derived from which actions are held.
+type action int
+
+const (
+	actForward action = iota
+	actBack
+	actLeft
+	actRight
+	actZDown
+	actZUp
+	actGripClose
+	actGripOpen
+	actEStop
+)
+
+// layouts map browser KeyboardEvent.code names to actions. evdev codes are
+// translated to these same names in keyboard_linux.go.
+var layouts = map[string]map[string]action{
+	"wasd": {
+		"KeyW": actForward, "KeyS": actBack, "KeyA": actLeft, "KeyD": actRight,
+		"KeyQ": actZDown, "KeyE": actZUp, "KeyZ": actGripClose, "KeyC": actGripOpen,
+		"Space": actEStop,
+	},
+	"arrows": {
+		"ArrowUp": actForward, "ArrowDown": actBack, "ArrowLeft": actLeft, "ArrowRight": actRight,
+		"ShiftLeft": actZDown, "ShiftRight": actZUp, "ControlLeft": actGripClose, "ControlRight": actGripOpen,
+		"Space": actEStop,
+	},
 }
 
-type keyboardInput struct {
-	resource.AlwaysRebuild
+// buttonControls are the actions that map 1:1 to a button control.
+// Hat axes are synthesized from the forward/back and left/right pairs.
+var buttonControls = map[action]input.Control{
+	actZDown:     input.ButtonLT,
+	actZUp:       input.ButtonRT,
+	actGripClose: input.ButtonWest,
+	actGripOpen:  input.ButtonEast,
+	actEStop:     input.ButtonEStop,
+}
+
+// controls is the fixed list returned by Controls(), regardless of layout.
+var controls = []input.Control{
+	input.AbsoluteHat0X, input.AbsoluteHat0Y,
+	input.ButtonLT, input.ButtonRT, input.ButtonWest, input.ButtonEast, input.ButtonEStop,
+}
+
+type source int
+
+const (
+	srcEvdev source = iota
+	srcWeb
+	numSources
+)
+
+type keyboard struct {
 	resource.Named
+	resource.AlwaysRebuild
 
-	name   resource.Name
+	logger      logging.Logger
+	keys        map[string]action // active layout
+	holdTimeout time.Duration
 
-	logger logging.Logger
-	cfg    Config
+	// mu guards everything below and is held during callback dispatch.
+	// Callbacks must not call back into this controller.
+	mu         sync.Mutex
+	closed     bool
+	held       [numSources]map[action]time.Time // last press or keepalive, server clock
+	lastEvents map[input.Control]input.Event
+	callbacks  map[input.Control]map[input.EventType]input.ControlFunction
 
-	cancelCtx  context.Context
-	cancelFunc func()
+	workers *utils.StoppableWorkers
 }
 
-func newKeyboardInput(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (input.Controller, error) {
-	conf, err := resource.NativeConfig[Config](rawConf)
+func newKeyboardInput(
+	ctx context.Context, _ resource.Dependencies, rawConf resource.Config, logger logging.Logger,
+) (input.Controller, error) {
+	conf, err := resource.NativeConfig[*Config](rawConf)
 	if err != nil {
 		return nil, err
 	}
-
-    return NewInput(ctx, deps, rawConf.ResourceName(), conf, logger)
-
+	return NewInput(ctx, rawConf.ResourceName(), conf, logger)
 }
 
-func NewInput(ctx context.Context, deps resource.Dependencies, name resource.Name, conf Config, logger logging.Logger) (input.Controller, error) {
-
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
-
-	s := &keyboardInput{
-		name:       name,
-		logger:     logger,
-		cfg:        conf,
-		cancelCtx:  cancelCtx,
-		cancelFunc: cancelFunc,
+// NewInput builds the controller from a native config.
+func NewInput(ctx context.Context, name resource.Name, conf *Config, logger logging.Logger) (input.Controller, error) {
+	layout := conf.Layout
+	if layout == "" {
+		layout = "wasd"
 	}
-	return s, nil
+	keys, ok := layouts[layout]
+	if !ok {
+		return nil, fmt.Errorf("unknown layout %q", layout)
+	}
+	timeout := defaultHoldTimeout
+	if conf.HoldTimeoutMs != nil {
+		timeout = time.Duration(*conf.HoldTimeoutMs) * time.Millisecond
+	}
+
+	k := &keyboard{
+		Named:       name.AsNamed(),
+		logger:      logger,
+		keys:        keys,
+		holdTimeout: timeout,
+		lastEvents:  map[input.Control]input.Event{},
+		callbacks:   map[input.Control]map[input.EventType]input.ControlFunction{},
+	}
+	for s := range k.held {
+		k.held[s] = map[action]time.Time{}
+	}
+
+	k.mu.Lock()
+	k.sweepLocked(ctx, input.Connect)
+	k.recomputeLocked(ctx, time.Now())
+	k.mu.Unlock()
+
+	var workers []func(context.Context)
+	if timeout > 0 {
+		workers = append(workers, k.watchdog)
+	}
+	if conf.DevFile != "" {
+		w, err := k.deviceWorker(conf.DevFile, conf.Grab)
+		if err != nil {
+			return nil, err
+		}
+		workers = append(workers, w)
+	}
+	k.workers = utils.NewBackgroundStoppableWorkers(workers...)
+	return k, nil
 }
 
-func (s *keyboardInput) Name() resource.Name {
-	return s.name
+// keyLocked applies a press or release of act from src and recomputes.
+// A repeat press from the same source only refreshes the timestamp.
+// Caller holds k.mu.
+func (k *keyboard) keyLocked(ctx context.Context, src source, act action, pressed bool, at time.Time) {
+	if pressed {
+		if _, already := k.held[src][act]; already {
+			k.held[src][act] = time.Now()
+			return
+		}
+		if act == actEStop {
+			for s := range k.held {
+				clear(k.held[s])
+			}
+		}
+		k.held[src][act] = time.Now()
+	} else {
+		delete(k.held[src], act)
+	}
+	k.recomputeLocked(ctx, at)
 }
 
-// Controls returns a list of Controls provided by the Controller
-func (s *keyboardInput) Controls(ctx context.Context, extra map[string]interface{}) ([]input.Control, error) {
-	return nil, fmt.Errorf("not implemented")
+func (k *keyboard) isHeld(act action) bool {
+	for s := range k.held {
+		if _, ok := k.held[s][act]; ok {
+			return true
+		}
+	}
+	return false
 }
 
- // Events returns most recent Event for each input (which should be the current state)
-func (s *keyboardInput) Events(ctx context.Context, extra map[string]interface{}) (map[input.Control]input.Event, error) {
-	return nil, fmt.Errorf("not implemented")
+func b2f(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
- func (s *keyboardInput) TriggerEvent(ctx context.Context, event input.Event, extra map[string]interface{}) error {
-	return fmt.Errorf("not implemented")
+// recomputeLocked derives every control from the held sets and emits only
+// the ones whose value differs from lastEvents. Caller holds k.mu.
+func (k *keyboard) recomputeLocked(ctx context.Context, at time.Time) {
+	k.setLocked(ctx, input.AbsoluteHat0Y, b2f(k.isHeld(actBack))-b2f(k.isHeld(actForward)), at)
+	k.setLocked(ctx, input.AbsoluteHat0X, b2f(k.isHeld(actRight))-b2f(k.isHeld(actLeft)), at)
+	for act, ctrl := range buttonControls {
+		k.setLocked(ctx, ctrl, b2f(k.isHeld(act)), at)
+	}
 }
 
- // RegisterCallback registers a callback that will fire on given EventTypes for a given Control.
-// The callback is called on the same goroutine as the firer and if any long operation is to occur,
-// the callback should start a goroutine.
-func (s *keyboardInput) RegisterControlCallback(ctx context.Context, control input.Control, triggers []input.EventType, ctrlFunc input.ControlFunction, extra map[string]interface{}) error {
-	return fmt.Errorf("not implemented")
+func (k *keyboard) setLocked(ctx context.Context, ctrl input.Control, val float64, at time.Time) {
+	if last, ok := k.lastEvents[ctrl]; ok && last.Value == val {
+		return
+	}
+	ev := input.Event{Time: at, Control: ctrl, Value: val}
+	switch ctrl {
+	case input.AbsoluteHat0X, input.AbsoluteHat0Y:
+		ev.Event = input.PositionChangeAbs
+	default:
+		ev.Event = input.ButtonRelease
+		if val == 1 {
+			ev.Event = input.ButtonPress
+		}
+	}
+	k.emitLocked(ctx, ev)
 }
 
- func (s *keyboardInput) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("not implemented")
+// emitLocked records the event and fires callbacks. Caller holds k.mu.
+func (k *keyboard) emitLocked(ctx context.Context, ev input.Event) {
+	k.lastEvents[ev.Control] = ev
+	cbs := k.callbacks[ev.Control]
+	if f := cbs[ev.Event]; f != nil {
+		f(ctx, ev)
+	}
+	if f := cbs[input.AllEvents]; f != nil {
+		f(ctx, ev)
+	}
 }
 
- func (s *keyboardInput) Status(ctx context.Context) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("not implemented")
+// sweepLocked emits typ (Connect or Disconnect) for every control, which
+// zeroes the comparison baseline. Callers follow it with recomputeLocked.
+func (k *keyboard) sweepLocked(ctx context.Context, typ input.EventType) {
+	now := time.Now()
+	for _, c := range controls {
+		k.emitLocked(ctx, input.Event{Time: now, Event: typ, Control: c})
+	}
 }
 
+// deviceConnected is called by the evdev worker after opening the device.
+func (k *keyboard) deviceConnected(ctx context.Context) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.sweepLocked(ctx, input.Connect)
+	k.recomputeLocked(ctx, time.Now())
+}
 
+// deviceLost is called by the evdev worker when the device goes away.
+func (k *keyboard) deviceLost(ctx context.Context) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	clear(k.held[srcEvdev])
+	k.recomputeLocked(ctx, time.Now())
+	k.sweepLocked(ctx, input.Disconnect)
+	k.recomputeLocked(ctx, time.Now())
+}
 
-func (s *keyboardInput) Close(context.Context) error {
-	// Put close code here
-	s.cancelFunc()
+// evdevKey is the evdev worker's entry point. code is a browser
+// KeyboardEvent.code name; unmapped codes are ignored.
+func (k *keyboard) evdevKey(ctx context.Context, code string, pressed bool, at time.Time) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if act, ok := k.keys[code]; ok {
+		k.keyLocked(ctx, srcEvdev, act, pressed, at)
+	}
+}
+
+// Controls returns the fixed set this controller can emit.
+func (k *keyboard) Controls(context.Context, map[string]interface{}) ([]input.Control, error) {
+	return append([]input.Control(nil), controls...), nil
+}
+
+// Events returns the last event per control.
+func (k *keyboard) Events(context.Context, map[string]interface{}) (map[input.Control]input.Event, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := make(map[input.Control]input.Event, len(k.lastEvents))
+	for c, e := range k.lastEvents {
+		out[c] = e
+	}
+	return out, nil
+}
+
+// RegisterControlCallback mirrors webgamepad: ButtonChange expands to Press+Release.
+func (k *keyboard) RegisterControlCallback(
+	_ context.Context, control input.Control, triggers []input.EventType,
+	f input.ControlFunction, _ map[string]interface{},
+) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.callbacks[control] == nil {
+		k.callbacks[control] = map[input.EventType]input.ControlFunction{}
+	}
+	for _, tr := range triggers {
+		if tr == input.ButtonChange {
+			k.callbacks[control][input.ButtonPress] = f
+			k.callbacks[control][input.ButtonRelease] = f
+			continue
+		}
+		k.callbacks[control][tr] = f
+	}
+	return nil
+}
+
+// TriggerEvent accepts raw browser key codes only. Press adds to the web
+// held set, Release removes, Hold refreshes an existing hold (keepalive).
+// Timestamps use the server clock; inbound Time only feeds Event.Time.
+func (k *keyboard) TriggerEvent(ctx context.Context, ev input.Event, _ map[string]interface{}) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return errors.New("keyboard input controller is closed")
+	}
+	act, ok := k.keys[string(ev.Control)]
+	if !ok {
+		return fmt.Errorf("unknown key %q for this layout", ev.Control)
+	}
+	at := ev.Time
+	if at.IsZero() || at.Unix() <= 0 {
+		at = time.Now()
+	}
+	switch ev.Event {
+	case input.ButtonPress:
+		k.keyLocked(ctx, srcWeb, act, true, at)
+	case input.ButtonRelease:
+		k.keyLocked(ctx, srcWeb, act, false, at)
+	case input.ButtonHold:
+		if _, held := k.held[srcWeb][act]; held {
+			k.held[srcWeb][act] = time.Now()
+		}
+	default:
+		return fmt.Errorf("unsupported event type %q; want ButtonPress, ButtonRelease, or ButtonHold", ev.Event)
+	}
+	return nil
+}
+
+// DoCommand is not implemented.
+func (k *keyboard) DoCommand(context.Context, map[string]interface{}) (map[string]interface{}, error) {
+	return nil, resource.ErrDoUnimplemented
+}
+
+// watchdog expires web-held keys that have not been refreshed within holdTimeout.
+func (k *keyboard) watchdog(ctx context.Context) {
+	t := time.NewTicker(k.holdTimeout / 2)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			k.mu.Lock()
+			k.expireWebLocked(ctx, now)
+			k.mu.Unlock()
+		}
+	}
+}
+
+// expireWebLocked is the watchdog body, separated so tests can drive it with
+// a chosen clock. Caller holds k.mu.
+func (k *keyboard) expireWebLocked(ctx context.Context, now time.Time) {
+	changed := false
+	for act, ts := range k.held[srcWeb] {
+		if now.Sub(ts) > k.holdTimeout {
+			delete(k.held[srcWeb], act)
+			changed = true
+		}
+	}
+	if changed {
+		k.recomputeLocked(ctx, now)
+	}
+}
+
+// Close marks the controller closed, stops workers (without holding the
+// mutex, see spec), then releases every held key so consumers see zeros.
+func (k *keyboard) Close(ctx context.Context) error {
+	k.mu.Lock()
+	if k.closed {
+		k.mu.Unlock()
+		return nil
+	}
+	k.closed = true
+	k.mu.Unlock()
+
+	k.workers.Stop()
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for s := range k.held {
+		clear(k.held[s])
+	}
+	k.recomputeLocked(ctx, time.Now())
 	return nil
 }
