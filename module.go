@@ -292,12 +292,18 @@ func (k *keyboard) emitLocked(ctx context.Context, ev input.Event) {
 
 	k.lastEvents[ev.Control] = ev
 	cbs := k.callbacks[ev.Control]
+	fired := 0
 	if f := cbs[ev.Event]; f != nil {
+		fired++
 		f(cctx, ev)
 	}
 	if f := cbs[input.AllEvents]; f != nil {
+		fired++
 		f(cctx, ev)
 	}
+	k.logger.Debugw("input event emitted",
+		"control", ev.Control, "event", ev.Event, "value", ev.Value,
+		"listeners_fired", fired, "registered_event_types", len(cbs))
 }
 
 // sweepLocked emits typ (Connect or Disconnect) for every control, which
@@ -381,6 +387,9 @@ func (k *keyboard) RegisterControlCallback(
 		}
 		k.callbacks[control][tr] = f
 	}
+	k.logger.Debugw("input callback registered",
+		"control", control, "triggers", triggers, "removing", f == nil,
+		"registered_event_types", len(k.callbacks[control]))
 	return nil
 }
 
