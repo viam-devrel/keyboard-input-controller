@@ -141,11 +141,13 @@ and does not re-run the clear-all below.
 `ButtonEStop` press additionally clears both held sets, then re-inserts the
 EStop code into the pressing source's set, then recomputes. One recompute
 therefore emits every zeroed axis, every button release, and the
-`ButtonEStop` press. Space is a true panic key. Its later release emits the
-`ButtonEStop` release as normal. Physical keys still held will re-press on their
-next evdev event (there is none until release, so they stay released);
-web keys stay released because keepalives for a key that is not in
-`webHeld` are ignored.
+`ButtonEStop` press. `buttonControls`'s fixed order guarantees `ButtonEStop`
+is always the last event of that recompute, after both axes are zeroed and
+every other button's release has gone out. Space is a true panic key. Its
+later release emits the `ButtonEStop` release as normal. Physical keys still
+held will re-press on their next evdev event (there is none until release,
+so they stay released); web keys stay released because keepalives for a key
+that is not in `webHeld` are ignored.
 
 ### Callback dispatch
 
@@ -153,7 +155,10 @@ Identical to the RDK `webgamepad`: a `map[Control]map[EventType]ControlFunction`
 last event cached per control, `ButtonChange` registration expands to
 `ButtonPress` + `ButtonRelease`, `AllEvents` callbacks fire in addition to
 specific ones. Callbacks run on the firer's goroutine; consumers must not
-block.
+block. `RegisterControlCallback` does not replay `lastEvents` to the new
+callback, so a consumer that (re)registers mid-hold sees zero state until
+the next key change; this fails safe (worst case is a missed update, not a
+stuck value) and self-heals on the next held-key transition.
 
 ### Source 1: evdev (Linux only)
 
@@ -186,15 +191,15 @@ step; on cancel it closes the device if open and returns without emitting
    Note: `Poll` closes the channel on any read error and only sends
    `SyncDisconnect` first for `ENODEV`. The RDK gamepad's `<-evChan` with a
    nil check busy-spins on a closed channel; do not copy that.
-5. Device lost: if `ctx.Done()`, `dev.Close()` and return. Otherwise
-   clear `evdevHeld`, recompute (emits zero axes and releases), emit
-   `Disconnect` for all controls, recompute again (re-emits anything the
-   web source still holds), `dev.Close()`, wait 250ms via
-   `utils.SelectContextOrWait`, back to step 1. The wait matters even
-   though open succeeded: a `dev_file` naming an openable-but-unreadable
-   file (e.g. a regular file or `/dev/null`) makes `Poll` return
-   immediately with no timeout error, and without the wait the worker
-   would spin a hot open/read/close loop.
+5. Device lost: `dev.Close()`. If `ctx.Done()`, return (no `Disconnect`;
+   `Close` handles its own release recompute). Otherwise clear `evdevHeld`,
+   recompute (emits zero axes and releases), emit `Disconnect` for all
+   controls, recompute again (re-emits anything the web source still
+   holds), wait 250ms via `utils.SelectContextOrWait`, back to step 1. The
+   wait matters even though open succeeded: a `dev_file` naming an
+   openable-but-unreadable file (e.g. a regular file or `/dev/null`) makes
+   `Poll` return immediately with no timeout error, and without the wait
+   the worker would spin a hot open/read/close loop.
 
 The README documents finding the device with `ls /dev/input/by-id/` and
 `evtest`, and the `grab` tradeoff.
@@ -261,11 +266,15 @@ Any TypeScript SDK client is a valid keyboard. The contract:
 
 `preventDefault` matters for the `arrows` layout, where arrows and Space
 otherwise scroll the page. This holds only while that layout is active;
-arrows are not `preventDefault`ed under `wasd`.
+arrows are not `preventDefault`ed under `wasd`. The shipped page also scopes
+capture to outside its `<form id="f">` (`e.target.closest("#f")`) on both
+`keydown` and `keyup`, so typing into the host/API key fields never registers
+as gameplay input; `keyup`'s release still runs even when the key originated
+inside the form, since suppressing `preventDefault` there would break
+Space-activating the Connect button.
 
 ```ts
 import { createRobotClient, InputControllerClient } from "@viamrobotics/sdk";
-import { Timestamp } from "@bufbuild/protobuf";
 
 const MAPPED = new Set(["KeyW","KeyA","KeyS","KeyD","KeyQ","KeyE","KeyZ","KeyC","Space",
   "ArrowUp","ArrowDown","ArrowLeft","ArrowRight","ShiftLeft","ShiftRight","ControlLeft","ControlRight"]);
@@ -277,8 +286,9 @@ const machine = await createRobotClient({
 });
 const kb = new InputControllerClient(machine, "keyboard");
 const held = new Set<string>();
+// Time is omitted on purpose: the module ignores client clocks and defaults Event.Time to now.
 const send = (control: string, event: string, value: number) =>
-  kb.triggerEvent({ time: Timestamp.now(), control, event, value });
+  kb.triggerEvent({ control, event, value });
 
 addEventListener("keydown", (e) => {
   if (!MAPPED.has(e.code)) return;

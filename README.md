@@ -39,11 +39,17 @@ Design details: `docs/SPEC.md`.
 | `AbsoluteHat0X` | A / D | ← / → | -1 left, +1 right |
 | `ButtonLT` | Q | Left Shift | Z down |
 | `ButtonRT` | E | Right Shift | Z up |
-| `ButtonWest` | Z | Left Ctrl | gripper close |
-| `ButtonEast` | C | Right Ctrl | gripper open |
-| `ButtonEStop` | Space | Space | stop; also releases every other key |
+| `ButtonWest` | Z | Left Ctrl | gripper close (emitted; not consumed by `arm-remote-control`) |
+| `ButtonEast` | C | Right Ctrl | gripper open (emitted; not consumed by `arm-remote-control`) |
+| `ButtonEStop` | Space | Space | releases every held key |
 
 Axes are digital (-1, 0, +1). Opposite keys held together give 0.
+
+With `hipsterbrown:arm-remote-control`, only `AbsoluteHat0X/Y` and
+`ButtonLT/RT` are consumed. Space does not call `arm.Stop()`: releasing
+every held key zeros the hat axes so the movement loop stops issuing new
+moves, but an in-flight move completes, up to one `step_size` (default
+10mm).
 
 ### Local keyboard (Linux)
 
