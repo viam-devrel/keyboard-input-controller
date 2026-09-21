@@ -314,6 +314,7 @@ key ID, and API key, and a Connect button. No build step.
 | `keyboard_linux.go` | evdev reader (`//go:build linux`) |
 | `keyboard_other.go` | stub for non-Linux |
 | `module_test.go` | mapping, axis synthesis, watchdog, device-loss release |
+| `keyboard_linux_test.go` | evdev key translation and decode (`//go:build linux`) |
 | `examples/web/index.html` | test page |
 | `README.md` | config table, device setup, `grab` tradeoff, web usage |
 
