@@ -7,7 +7,7 @@
 <style>
   body { font: 16px system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; padding: 0 1rem; }
   label { display: block; margin: .5rem 0; }
-  input { width: 100%; padding: .4rem; font: inherit; }
+  input, select { width: 100%; padding: .4rem; font: inherit; }
   #status { margin-top: 1rem; padding: .75rem; background: #eee; border-radius: .5rem; }
   #held { font-family: monospace; min-height: 1.5em; }
   kbd { display: inline-block; padding: .1rem .4rem; border: 1px solid #999; border-radius: .25rem; margin: .1rem; }
@@ -20,6 +20,7 @@
   <label>API key ID <input name="keyId" required></label>
   <label>API key <input name="key" type="password" required></label>
   <label>Controller name <input name="name" value="keyboard" required></label>
+  <label>Layout <select name="layout"><option>wasd</option><option>arrows</option></select></label>
   <button>Connect</button>
 </form>
 <div id="status">Not connected.</div>
@@ -29,8 +30,11 @@
 <script type="module">
 import { createRobotClient, InputControllerClient } from "https://esm.sh/@viamrobotics/sdk@0.49.0";
 
-const MAPPED = new Set(["KeyW","KeyA","KeyS","KeyD","KeyQ","KeyE","KeyZ","KeyC","Space",
-  "ArrowUp","ArrowDown","ArrowLeft","ArrowRight","ShiftLeft","ShiftRight","ControlLeft","ControlRight"]);
+const LAYOUTS = {
+  wasd: ["KeyW","KeyA","KeyS","KeyD","KeyQ","KeyE","KeyZ","KeyC","Space"],
+  arrows: ["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","ShiftLeft","ShiftRight","ControlLeft","ControlRight","Space"],
+};
+let MAPPED = new Set(LAYOUTS.wasd);
 
 const status = document.getElementById("status");
 const heldEl = document.getElementById("held");
@@ -53,9 +57,12 @@ document.getElementById("f").addEventListener("submit", async (e) => {
       host: d.get("host"),
       signalingAddress: "https://app.viam.com:443",
       credentials: { type: "api-key", payload: d.get("key"), authEntity: d.get("keyId") },
+      dialTimeout: 10000,
     });
-    kb = new InputControllerClient(machine, d.get("name"));
-    await kb.getEvents(); // proves the component exists
+    const c = new InputControllerClient(machine, d.get("name"));
+    await c.getEvents(); // proves the component exists
+    kb = c;
+    MAPPED = new Set(LAYOUTS[d.get("layout")]);
     status.textContent = "Connected. Click outside the form, then hold keys.";
     document.activeElement?.blur();
   } catch (err) {

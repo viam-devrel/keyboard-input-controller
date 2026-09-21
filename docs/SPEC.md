@@ -297,6 +297,10 @@ addEventListener("beforeunload", releaseAll);
 document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
 ```
 
+`MAPPED` above is shown as the union of both layouts for brevity; the page
+itself sends only the keys of the layout selected in its form, since
+`TriggerEvent` rejects keys outside the module's configured layout.
+
 Ships as `examples/web/index.html`: one static file, `<script type="module">`
 importing the SDK from an ESM CDN (esm.sh), with text inputs for host, API
 key ID, and API key, and a Connect button. No build step.

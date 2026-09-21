@@ -57,7 +57,7 @@ or run `evtest` and pick the device that reports your keypresses.
 
 viam-server needs read/write on it. Add its user to the `input` group or
 add a udev rule. The module reconnects automatically if the keyboard is
-unplugged, and zeroes every control when that happens.
+unplugged, and zeroes every control the keyboard was holding.
 
 ### Web keyboard
 
@@ -72,6 +72,9 @@ Any Viam TypeScript SDK client can be a keyboard. Send raw browser
 
 The module ignores client timestamps. If keepalives stop for
 `hold_timeout_ms`, the key is released server-side.
+
+`TriggerEvent` rejects keys outside the configured layout, so the page's
+layout selector must match the module's `layout` attribute.
 
 A ready-made page is in `examples/web/index.html`. Open it, enter the
 machine host and an API key, click Connect, and hold keys.
