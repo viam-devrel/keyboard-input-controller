@@ -189,7 +189,12 @@ step; on cancel it closes the device if open and returns without emitting
 5. Device lost: if `ctx.Done()`, `dev.Close()` and return. Otherwise
    clear `evdevHeld`, recompute (emits zero axes and releases), emit
    `Disconnect` for all controls, recompute again (re-emits anything the
-   web source still holds), `dev.Close()`, back to step 1.
+   web source still holds), `dev.Close()`, wait 250ms via
+   `utils.SelectContextOrWait`, back to step 1. The wait matters even
+   though open succeeded: a `dev_file` naming an openable-but-unreadable
+   file (e.g. a regular file or `/dev/null`) makes `Poll` return
+   immediately with no timeout error, and without the wait the worker
+   would spin a hot open/read/close loop.
 
 The README documents finding the device with `ls /dev/input/by-id/` and
 `evtest`, and the `grab` tradeoff.

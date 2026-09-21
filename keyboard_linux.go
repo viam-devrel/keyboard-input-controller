@@ -55,6 +55,11 @@ func (k *keyboard) deviceWorker(devFile string, grab bool) (func(context.Context
 				return // Close() handles releases; no Disconnect on shutdown
 			}
 			k.deviceLost(ctx)
+			// Prevent a hot reconnect loop when the device opens but reads
+			// fail immediately (e.g. dev_file names a non-event file).
+			if !utils.SelectContextOrWait(ctx, 250*time.Millisecond) {
+				return
+			}
 		}
 	}, nil
 }
