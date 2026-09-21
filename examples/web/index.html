@@ -83,7 +83,10 @@ addEventListener("keydown", (e) => {
 });
 addEventListener("keyup", (e) => {
   if (!MAPPED.has(e.code)) return;
-  e.preventDefault();
+  // Release is unconditional so a key pressed on the body and released over a
+  // form field never sticks, but suppressing the default inside the form would
+  // break Space-activation of the Connect button, which fires on keyup.
+  if (!e.target.closest?.("#f")) e.preventDefault();
   if (held.delete(e.code)) { render(); send(e.code, "ButtonRelease", 0); }
 });
 setInterval(() => held.forEach((c) => send(c, "ButtonHold", 1)), 200);
