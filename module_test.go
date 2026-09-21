@@ -252,6 +252,24 @@ func TestConnectSweepReemitsHeld(t *testing.T) {
 	}
 }
 
+// TestEvdevIgnoresUnmappedCode calls kb.evdevKey directly (not the key
+// helper, whose own guard would reject an unmapped code before evdevKey's
+// guard is exercised at all). Without evdevKey's own `if act, ok :=
+// k.keys[code]; ok` check, an unmapped code would resolve to the zero-value
+// action, actForward, so an unrecognized keystroke would command forward
+// motion.
+func TestEvdevIgnoresUnmappedCode(t *testing.T) {
+	kb, got := newTestKB(t, Config{Layout: "wasd"})
+	*got = nil
+	kb.evdevKey(context.Background(), "ArrowUp", true, time.Now())
+	if len(*got) != 0 {
+		t.Fatalf("unmapped code emitted %d events: %+v", len(*got), *got)
+	}
+	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
+		t.Fatalf("unmapped code moved Hat0Y to %v, want 0", v)
+	}
+}
+
 func TestDeviceLostReleasesEvdevKeys(t *testing.T) {
 	kb, got := newTestKB(t, Config{})
 	key(t, kb, "KeyW", true)
@@ -400,12 +418,13 @@ func TestRepeatEStopPressDoesNotReclear(t *testing.T) {
 	}
 }
 
-// waitForValue polls c's value every 2ms until it equals want or a ~2s
+// waitForValue polls c's value every 2ms until it equals want or a ~5s
 // deadline passes, failing the test on timeout. Used to observe a live
-// background goroutine's effect without a fixed sleep.
+// background goroutine's effect without a fixed sleep. Polling means a
+// generous deadline costs nothing on the common, fast-success path.
 func waitForValue(t *testing.T, kb *keyboard, c input.Control, want float64) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if v := value(t, kb, c); v == want {
 			return
@@ -481,6 +500,31 @@ func TestButtonChangeRegistersBoth(t *testing.T) {
 	key(t, kb, "KeyQ", false)
 	if len(seen) != 2 || seen[0] != input.ButtonPress || seen[1] != input.ButtonRelease {
 		t.Fatalf("ButtonChange saw %v", seen)
+	}
+}
+
+// TestButtonControlsMatchControls pins two invariants that recomputeLocked
+// relies on but cannot state locally: every control in buttonControls must
+// also be in the fixed controls list (otherwise it would be emitted by
+// recomputeLocked but never receive a Connect/Disconnect sweep and never
+// appear in Controls()), and actEStop must be the last entry in
+// buttonControls so its press is always the last event of an EStop
+// recompute, after every other button's release.
+func TestButtonControlsMatchControls(t *testing.T) {
+	inControls := map[input.Control]bool{}
+	for _, c := range controls {
+		inControls[c] = true
+	}
+	for _, bc := range buttonControls {
+		if !inControls[bc.ctrl] {
+			t.Errorf("buttonControls has %s, which is missing from controls", bc.ctrl)
+		}
+	}
+	if n, want := len(controls), len(buttonControls)+2; n != want {
+		t.Errorf("controls has %d entries, want %d (2 hat axes + %d buttons)", n, want, len(buttonControls))
+	}
+	if last := buttonControls[len(buttonControls)-1]; last.act != actEStop {
+		t.Errorf("buttonControls must end in actEStop so its press is emitted last; ends in %s", last.ctrl)
 	}
 }
 

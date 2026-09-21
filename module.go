@@ -198,6 +198,7 @@ func NewInput(ctx context.Context, name resource.Name, conf *Config, logger logg
 // watchdog must never depend on a caller-supplied time (see docs/SPEC.md,
 // "Held-key timestamps use the server clock only"). Do not "simplify" this
 // by storing eventTime instead.
+//
 // Caller holds k.mu.
 func (k *keyboard) keyLocked(ctx context.Context, src source, act action, pressed bool, eventTime time.Time) {
 	if pressed {
