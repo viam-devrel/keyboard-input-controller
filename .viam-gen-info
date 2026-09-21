@@ -1,0 +1,13 @@
+{
+  "module_name": "keyboard",
+  "visibility": "public",
+  "namespace": "devrel",
+  "language": "go",
+  "resource_type": "component",
+  "resource_subtype": "input",
+  "model_name": "input",
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2026-09-20T23:41:57.879558Z",
+  "module_readme_link": "README.md"
+}
