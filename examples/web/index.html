@@ -48,6 +48,11 @@ const send = (control, event, value) =>
 const render = () => { heldEl.innerHTML = [...held].map((c) => `<kbd>${c}</kbd>`).join(" "); };
 const releaseAll = () => { held.forEach((c) => send(c, "ButtonRelease", 0)); held.clear(); render(); };
 
+const layoutSel = document.querySelector("select[name=layout]");
+const applyLayout = () => { releaseAll(); MAPPED = new Set(LAYOUTS[layoutSel.value]); };
+layoutSel.addEventListener("change", applyLayout);
+applyLayout();
+
 document.getElementById("f").addEventListener("submit", async (e) => {
   e.preventDefault();
   const d = new FormData(e.target);
@@ -58,11 +63,11 @@ document.getElementById("f").addEventListener("submit", async (e) => {
       signalingAddress: "https://app.viam.com:443",
       credentials: { type: "api-key", payload: d.get("key"), authEntity: d.get("keyId") },
       dialTimeout: 10000,
+      noReconnect: true,
     });
     const c = new InputControllerClient(machine, d.get("name"));
     await c.getEvents(); // proves the component exists
     kb = c;
-    MAPPED = new Set(LAYOUTS[d.get("layout")]);
     status.textContent = "Connected. Click outside the form, then hold keys.";
     document.activeElement?.blur();
   } catch (err) {
@@ -71,7 +76,7 @@ document.getElementById("f").addEventListener("submit", async (e) => {
 });
 
 addEventListener("keydown", (e) => {
-  if (!MAPPED.has(e.code) || e.target.tagName === "INPUT") return;
+  if (!MAPPED.has(e.code) || e.target.closest?.("#f")) return;
   e.preventDefault();
   if (e.repeat || held.has(e.code)) return;
   held.add(e.code); render(); send(e.code, "ButtonPress", 1);

@@ -260,7 +260,8 @@ Any TypeScript SDK client is a valid keyboard. The contract:
   `ButtonRelease` for each held code and clear the set.
 
 `preventDefault` matters for the `arrows` layout, where arrows and Space
-otherwise scroll the page.
+otherwise scroll the page. This holds only while that layout is active;
+arrows are not `preventDefault`ed under `wasd`.
 
 ```ts
 import { createRobotClient, InputControllerClient } from "@viamrobotics/sdk";
