@@ -151,11 +151,34 @@ that is not in `webHeld` are ignored.
 
 ### Callback dispatch
 
-Identical to the RDK `webgamepad`: a `map[Control]map[EventType]ControlFunction`,
-last event cached per control, `ButtonChange` registration expands to
-`ButtonPress` + `ButtonRelease`, `AllEvents` callbacks fire in addition to
-specific ones. Callbacks run on the firer's goroutine; consumers must not
-block. `RegisterControlCallback` does not replay `lastEvents` to the new
+A `map[Control]map[EventType][]subscriber`, last event cached per control,
+`ButtonChange` registration expands to `ButtonPress` + `ButtonRelease`,
+`AllEvents` callbacks fire in addition to specific ones.
+
+This deliberately diverges from the RDK `webgamepad`, which keeps a single
+callback per control and event type and invokes it while holding its lock.
+Both properties are defects for this module, whose whole purpose is to be
+read by a consumer while a page drives it:
+
+- **Several consumers may subscribe to the same control.** Entries are keyed
+  by the registering context, which for a streaming consumer is its stream
+  context. Registering again with the same context replaces that consumer's
+  entry; a nil callback removes only that consumer. With a single slot, a
+  second consumer silently displaced the first, which then received nothing.
+- **Dispatch does not hold the mutex.** Events are queued under the lock and
+  dispatched after releasing it. Holding the lock across dispatch meant one
+  blocked subscriber stalled every later `RegisterControlCallback`, so a
+  consumer hung on registration and never received anything. The RDK's input
+  server installs a callback that sends on a 1024-slot channel and escapes
+  only via its context, so a subscriber whose stream died is exactly that.
+- **Departed consumers are dropped.** A subscriber whose context is done is
+  skipped and pruned, because the RDK does not deregister a callback when
+  its stream dies. Each call is also bounded, so a live-but-backed-up
+  subscriber costs one delayed event rather than stalling the dispatcher.
+
+Callbacks run on the dispatching goroutine with no lock held, so they may
+call back into the controller, but dispatch is sequential and a slow
+callback delays the events behind it. `RegisterControlCallback` does not replay `lastEvents` to the new
 callback, so a consumer that (re)registers mid-hold sees zero state until
 the next key change; this fails safe (worst case is a missed update, not a
 stuck value) and self-heals on the next held-key transition.

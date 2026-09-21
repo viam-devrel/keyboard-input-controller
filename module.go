@@ -1,11 +1,17 @@
 // Package keyboard implements a Viam input controller driven by keyboard keys,
 // from a local evdev device (Linux) or from a browser via TriggerEvent.
 //
-// A single mutex guards all controller state and is held for the duration of
-// callback dispatch. Callbacks registered via RegisterControlCallback must
-// not call Events, RegisterControlCallback, TriggerEvent, or Close on this
-// controller: the mutex is not reentrant, so doing so deadlocks the calling
-// goroutine.
+// A single mutex guards all controller state, but it is deliberately NOT held
+// while callbacks run. Events are queued under the lock and dispatched after
+// releasing it, because a subscriber whose callback blocks would otherwise
+// stall every later RegisterControlCallback behind the same mutex, which
+// presents as a consumer hanging on registration and never receiving events.
+//
+// Each consumer registers with its own context (the RDK input server passes
+// its stream context), so independent consumers coexist rather than
+// overwriting one another, and a consumer whose context is done is dropped
+// on the next dispatch. This matters because the RDK never deregisters a
+// callback when its stream dies.
 package keyboard
 
 import (
@@ -114,6 +120,15 @@ var controls = []input.Control{
 	input.ButtonLT, input.ButtonRT, input.ButtonWest, input.ButtonEast, input.ButtonEStop,
 }
 
+// subscriber is one registered callback. Each streaming consumer registers
+// with its own context (the RDK input server passes its stream context), so
+// independent consumers coexist instead of overwriting each other, and a
+// consumer that goes away is recognised by its context being done.
+type subscriber struct {
+	ctx context.Context
+	fn  input.ControlFunction
+}
+
 type source int
 
 const (
@@ -130,13 +145,15 @@ type keyboard struct {
 	keys        map[string]action // active layout
 	holdTimeout time.Duration
 
-	// mu guards everything below and is held during callback dispatch.
-	// Callbacks must not call back into this controller.
+	// mu guards everything below. It is NOT held while callbacks run:
+	// emitLocked queues events and flush dispatches them after releasing the
+	// lock, so one slow subscriber cannot block registration or other emits.
 	mu         sync.Mutex
 	closed     bool
 	held       [numSources]map[action]time.Time // last press or keepalive, server clock
 	lastEvents map[input.Control]input.Event
-	callbacks  map[input.Control]map[input.EventType]input.ControlFunction
+	pending    []input.Event // emitted under mu, dispatched by flush
+	callbacks  map[input.Control]map[input.EventType][]subscriber
 
 	workers *utils.StoppableWorkers
 }
@@ -172,7 +189,7 @@ func NewInput(ctx context.Context, name resource.Name, conf *Config, logger logg
 		keys:        keys,
 		holdTimeout: timeout,
 		lastEvents:  map[input.Control]input.Event{},
-		callbacks:   map[input.Control]map[input.EventType]input.ControlFunction{},
+		callbacks:   map[input.Control]map[input.EventType][]subscriber{},
 	}
 	for s := range k.held {
 		k.held[s] = map[action]time.Time{}
@@ -205,7 +222,7 @@ func NewInput(ctx context.Context, name resource.Name, conf *Config, logger logg
 // by storing eventTime instead.
 //
 // Caller holds k.mu.
-func (k *keyboard) keyLocked(ctx context.Context, src source, act action, pressed bool, eventTime time.Time) {
+func (k *keyboard) keyLocked(src source, act action, pressed bool, eventTime time.Time) {
 	if pressed {
 		if _, already := k.held[src][act]; already {
 			k.held[src][act] = time.Now()
@@ -220,7 +237,7 @@ func (k *keyboard) keyLocked(ctx context.Context, src source, act action, presse
 	} else {
 		delete(k.held[src], act)
 	}
-	k.recomputeLocked(ctx, eventTime)
+	k.recomputeLocked(eventTime)
 }
 
 // isHeldLocked reports whether act is held by any source. Caller holds k.mu.
@@ -246,17 +263,17 @@ func boolToFloat(b bool) float64 {
 // deterministic. In particular, on an EStop clear-all, ButtonEStop is always
 // the last event of the recompute, after both axes are zeroed and every
 // other button's release goes out. Caller holds k.mu.
-func (k *keyboard) recomputeLocked(ctx context.Context, at time.Time) {
-	k.setLocked(ctx, input.AbsoluteHat0Y, boolToFloat(k.isHeldLocked(actBack))-boolToFloat(k.isHeldLocked(actForward)), at)
-	k.setLocked(ctx, input.AbsoluteHat0X, boolToFloat(k.isHeldLocked(actRight))-boolToFloat(k.isHeldLocked(actLeft)), at)
+func (k *keyboard) recomputeLocked(at time.Time) {
+	k.setLocked(input.AbsoluteHat0Y, boolToFloat(k.isHeldLocked(actBack))-boolToFloat(k.isHeldLocked(actForward)), at)
+	k.setLocked(input.AbsoluteHat0X, boolToFloat(k.isHeldLocked(actRight))-boolToFloat(k.isHeldLocked(actLeft)), at)
 	for _, bc := range buttonControls {
-		k.setLocked(ctx, bc.ctrl, boolToFloat(k.isHeldLocked(bc.act)), at)
+		k.setLocked(bc.ctrl, boolToFloat(k.isHeldLocked(bc.act)), at)
 	}
 }
 
 // setLocked records val for ctrl and emits an event only if it differs from
 // the last value recorded for ctrl. Caller holds k.mu.
-func (k *keyboard) setLocked(ctx context.Context, ctrl input.Control, val float64, at time.Time) {
+func (k *keyboard) setLocked(ctrl input.Control, val float64, at time.Time) {
 	if last, ok := k.lastEvents[ctrl]; ok && last.Value == val {
 		return
 	}
@@ -270,48 +287,88 @@ func (k *keyboard) setLocked(ctx context.Context, ctrl input.Control, val float6
 			ev.Event = input.ButtonPress
 		}
 	}
-	k.emitLocked(ctx, ev)
+	k.emitLocked(ev)
 }
 
-// emitLocked records the event and fires callbacks. Caller holds k.mu.
+// emitLocked records the event and queues it for dispatch. Caller holds k.mu.
 //
-// Callbacks run synchronously while k.mu is held (see the package doc), so a
-// callback that never returns wedges every future emit behind this mutex and
-// then deadlocks Close. The RDK installs a callback for a streaming
-// subscriber that blocks sending on a 1024-slot channel and only escapes via
-// its context; that context is this worker's, which is cancelled only at
-// Close. A subscriber that connects and then vanishes (e.g. the CONTROL tab
-// closes) would otherwise leave a dead callback wired up forever. Bounding
-// ctx here turns that permanent wedge into a single dropped event: a live
-// subscriber's channel send is effectively instant, a dead one times out.
-// Scoped to this call (not shared across recomputeLocked's several emits) so
-// each timer is created and cancelled here, with nothing to leak.
-func (k *keyboard) emitLocked(ctx context.Context, ev input.Event) {
-	cctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	defer cancel()
-
+// Dispatch deliberately does NOT happen here. Callbacks used to run while
+// k.mu was held, which meant one slow or wedged subscriber blocked every
+// later RegisterControlCallback behind the same mutex: a consumer would hang
+// registering and never receive anything. The RDK's input server installs a
+// callback that sends on a 1024-slot channel and escapes only via its
+// context, so a subscriber whose stream died is exactly that wedge. Events
+// are queued here and dispatched by flush once the lock is released.
+func (k *keyboard) emitLocked(ev input.Event) {
 	k.lastEvents[ev.Control] = ev
-	cbs := k.callbacks[ev.Control]
-	fired := 0
-	if f := cbs[ev.Event]; f != nil {
-		fired++
-		f(cctx, ev)
+	k.pending = append(k.pending, ev)
+}
+
+// flush dispatches queued events without holding k.mu. Subscribers whose
+// context is done are dropped rather than called, so a departed consumer
+// neither receives events nor holds a slot: the RDK never deregisters a
+// callback when its stream dies.
+func (k *keyboard) flush(ctx context.Context) {
+	k.mu.Lock()
+	pending := k.pending
+	k.pending = nil
+	k.mu.Unlock()
+
+	for _, ev := range pending {
+		k.mu.Lock()
+		subs := append([]subscriber(nil), k.callbacks[ev.Control][ev.Event]...)
+		subs = append(subs, k.callbacks[ev.Control][input.AllEvents]...)
+		k.mu.Unlock()
+
+		fired := 0
+		for _, sub := range subs {
+			if sub.ctx != nil && sub.ctx.Err() != nil {
+				continue // consumer is gone
+			}
+			fired++
+			// Bound the call so a live-but-backed-up subscriber costs one
+			// delayed event rather than stalling this goroutine.
+			cctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			sub.fn(cctx, ev)
+			cancel()
+		}
+		k.logger.Debugw("input event emitted",
+			"control", ev.Control, "event", ev.Event, "value", ev.Value,
+			"subscribers", len(subs), "listeners_fired", fired)
 	}
-	if f := cbs[input.AllEvents]; f != nil {
-		fired++
-		f(cctx, ev)
+	k.pruneDead()
+}
+
+// pruneDead drops subscribers whose context is done.
+func (k *keyboard) pruneDead() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for ctrl, byEvent := range k.callbacks {
+		for et, subs := range byEvent {
+			live := subs[:0]
+			for _, sub := range subs {
+				if sub.ctx == nil || sub.ctx.Err() == nil {
+					live = append(live, sub)
+				}
+			}
+			if len(live) == 0 {
+				delete(byEvent, et)
+				continue
+			}
+			byEvent[et] = live
+		}
+		if len(byEvent) == 0 {
+			delete(k.callbacks, ctrl)
+		}
 	}
-	k.logger.Debugw("input event emitted",
-		"control", ev.Control, "event", ev.Event, "value", ev.Value,
-		"listeners_fired", fired, "registered_event_types", len(cbs))
 }
 
 // sweepLocked emits typ (Connect or Disconnect) for every control, which
 // zeroes the comparison baseline. Callers follow it with recomputeLocked.
-func (k *keyboard) sweepLocked(ctx context.Context, typ input.EventType) {
+func (k *keyboard) sweepLocked(typ input.EventType) {
 	now := time.Now()
 	for _, c := range controls {
-		k.emitLocked(ctx, input.Event{Time: now, Event: typ, Control: c})
+		k.emitLocked(input.Event{Time: now, Event: typ, Control: c})
 	}
 }
 
@@ -320,9 +377,10 @@ func (k *keyboard) sweepLocked(ctx context.Context, typ input.EventType) {
 // final clear runs, so this cannot race an emit-after-Close.
 func (k *keyboard) deviceConnected(ctx context.Context) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.sweepLocked(ctx, input.Connect)
-	k.recomputeLocked(ctx, time.Now())
+	k.sweepLocked(input.Connect)
+	k.recomputeLocked(time.Now())
+	k.mu.Unlock()
+	k.flush(ctx)
 }
 
 // deviceLost is called by the evdev worker when the device goes away. No
@@ -330,11 +388,12 @@ func (k *keyboard) deviceConnected(ctx context.Context) {
 // final clear runs, so this cannot race an emit-after-Close.
 func (k *keyboard) deviceLost(ctx context.Context) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	clear(k.held[srcEvdev])
-	k.recomputeLocked(ctx, time.Now())
-	k.sweepLocked(ctx, input.Disconnect)
-	k.recomputeLocked(ctx, time.Now())
+	k.recomputeLocked(time.Now())
+	k.sweepLocked(input.Disconnect)
+	k.recomputeLocked(time.Now())
+	k.mu.Unlock()
+	k.flush(ctx)
 }
 
 // evdevKey is the evdev worker's entry point. code is a browser
@@ -343,10 +402,11 @@ func (k *keyboard) deviceLost(ctx context.Context) {
 // runs, so this cannot race an emit-after-Close.
 func (k *keyboard) evdevKey(ctx context.Context, code string, pressed bool, eventTime time.Time) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	if act, ok := k.keys[code]; ok {
-		k.keyLocked(ctx, srcEvdev, act, pressed, eventTime)
+		k.keyLocked(srcEvdev, act, pressed, eventTime)
 	}
+	k.mu.Unlock()
+	k.flush(ctx)
 }
 
 // Controls returns the fixed set this controller can emit.
@@ -365,38 +425,72 @@ func (k *keyboard) Events(context.Context, map[string]interface{}) (map[input.Co
 	return out, nil
 }
 
-// RegisterControlCallback mirrors webgamepad: ButtonChange expands to Press+Release.
+// RegisterControlCallback subscribes f to control. ButtonChange expands to
+// ButtonPress + ButtonRelease, as in webgamepad.
 //
-// f runs synchronously on the dispatching goroutine while k.mu is held. f
-// must not call Events, RegisterControlCallback, TriggerEvent, or Close on
-// this controller, or it will deadlock on the non-reentrant mutex.
+// Unlike webgamepad, several consumers may subscribe to the same control and
+// event type: entries are keyed by ctx, so registering again with the same
+// ctx replaces that consumer's entry while leaving others alone, and a nil f
+// removes only that consumer. f runs on the dispatching goroutine with no
+// controller lock held, so it may call back into this controller, but it
+// should still return promptly: dispatch is sequential and a slow f delays
+// the events behind it.
 func (k *keyboard) RegisterControlCallback(
-	_ context.Context, control input.Control, triggers []input.EventType,
+	ctx context.Context, control input.Control, triggers []input.EventType,
 	f input.ControlFunction, _ map[string]interface{},
 ) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.callbacks[control] == nil {
-		k.callbacks[control] = map[input.EventType]input.ControlFunction{}
+		k.callbacks[control] = map[input.EventType][]subscriber{}
 	}
 	for _, tr := range triggers {
 		if tr == input.ButtonChange {
-			k.callbacks[control][input.ButtonPress] = f
-			k.callbacks[control][input.ButtonRelease] = f
+			k.setSubscriberLocked(control, input.ButtonPress, ctx, f)
+			k.setSubscriberLocked(control, input.ButtonRelease, ctx, f)
 			continue
 		}
-		k.callbacks[control][tr] = f
+		k.setSubscriberLocked(control, tr, ctx, f)
 	}
-	k.logger.Debugw("input callback registered",
+	k.logger.Infow("input callback registered",
 		"control", control, "triggers", triggers, "removing", f == nil,
-		"registered_event_types", len(k.callbacks[control]))
+		"subscribers", len(k.callbacks[control][triggers[0]]))
 	return nil
+}
+
+// setSubscriberLocked adds or replaces this subscriber's entry for one
+// control and event type, keyed by its registering context so consumers do
+// not overwrite each other. A nil f removes only this subscriber, which is
+// how the RDK input server cancels a subscription. Caller holds k.mu.
+func (k *keyboard) setSubscriberLocked(
+	control input.Control, et input.EventType, ctx context.Context, f input.ControlFunction,
+) {
+	subs := k.callbacks[control][et]
+	for i, sub := range subs {
+		if sub.ctx == ctx {
+			if f == nil {
+				k.callbacks[control][et] = append(subs[:i], subs[i+1:]...)
+				return
+			}
+			subs[i].fn = f
+			return
+		}
+	}
+	if f != nil {
+		k.callbacks[control][et] = append(subs, subscriber{ctx: ctx, fn: f})
+	}
 }
 
 // TriggerEvent accepts raw browser key codes only. Press adds to the web
 // held set, Release removes, Hold refreshes an existing hold (keepalive).
 // Timestamps use the server clock; inbound Time only feeds Event.Time.
 func (k *keyboard) TriggerEvent(ctx context.Context, ev input.Event, _ map[string]interface{}) error {
+	err := k.triggerEventLocking(ev)
+	k.flush(ctx)
+	return err
+}
+
+func (k *keyboard) triggerEventLocking(ev input.Event) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.closed {
@@ -412,9 +506,9 @@ func (k *keyboard) TriggerEvent(ctx context.Context, ev input.Event, _ map[strin
 	}
 	switch ev.Event {
 	case input.ButtonPress:
-		k.keyLocked(ctx, srcWeb, act, true, at)
+		k.keyLocked(srcWeb, act, true, at)
 	case input.ButtonRelease:
-		k.keyLocked(ctx, srcWeb, act, false, at)
+		k.keyLocked(srcWeb, act, false, at)
 	case input.ButtonHold:
 		if _, held := k.held[srcWeb][act]; held {
 			k.held[srcWeb][act] = time.Now()
@@ -440,15 +534,16 @@ func (k *keyboard) watchdog(ctx context.Context) {
 			return
 		case now := <-t.C:
 			k.mu.Lock()
-			k.expireWebLocked(ctx, now)
+			k.expireWebLocked(now)
 			k.mu.Unlock()
+			k.flush(ctx)
 		}
 	}
 }
 
 // expireWebLocked is the watchdog body, separated so tests can drive it with
 // a chosen clock. Caller holds k.mu.
-func (k *keyboard) expireWebLocked(ctx context.Context, now time.Time) {
+func (k *keyboard) expireWebLocked(now time.Time) {
 	changed := false
 	for act, ts := range k.held[srcWeb] {
 		if now.Sub(ts) > k.holdTimeout {
@@ -457,7 +552,7 @@ func (k *keyboard) expireWebLocked(ctx context.Context, now time.Time) {
 		}
 	}
 	if changed {
-		k.recomputeLocked(ctx, now)
+		k.recomputeLocked(now)
 	}
 }
 
@@ -475,10 +570,11 @@ func (k *keyboard) Close(ctx context.Context) error {
 	k.workers.Stop()
 
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	for s := range k.held {
 		clear(k.held[s])
 	}
-	k.recomputeLocked(ctx, time.Now())
+	k.recomputeLocked(time.Now())
+	k.mu.Unlock()
+	k.flush(ctx)
 	return nil
 }

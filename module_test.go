@@ -3,6 +3,7 @@ package keyboard
 import (
 	"context"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,32 @@ import (
 )
 
 func intp(i int) *int { return &i }
+
+// recorder collects dispatched events. Dispatch no longer runs under the
+// controller's mutex, so it can arrive on a background goroutine (watchdog,
+// evdev worker) while the test goroutine reads; guard it.
+type recorder struct {
+	mu   sync.Mutex
+	evts []input.Event
+}
+
+func (r *recorder) add(ev input.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evts = append(r.evts, ev)
+}
+
+func (r *recorder) events() []input.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]input.Event(nil), r.evts...)
+}
+
+func (r *recorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evts = nil
+}
 
 func TestValidate(t *testing.T) {
 	cases := []struct {
@@ -53,7 +80,7 @@ func TestLayoutsCoverEveryAction(t *testing.T) {
 
 // newTestKB returns a controller with every control subscribed to AllEvents
 // and a pointer to the slice of events received, in order.
-func newTestKB(t *testing.T, cfg Config) (*keyboard, *[]input.Event) {
+func newTestKB(t *testing.T, cfg Config) (*keyboard, *recorder) {
 	t.Helper()
 	ctx := context.Background()
 	if cfg.HoldTimeoutMs == nil {
@@ -65,14 +92,14 @@ func newTestKB(t *testing.T, cfg Config) (*keyboard, *[]input.Event) {
 	}
 	kb := k.(*keyboard)
 	t.Cleanup(func() { _ = kb.Close(ctx) })
-	var got []input.Event
+	rec := &recorder{}
 	for _, c := range controls {
 		if err := kb.RegisterControlCallback(ctx, c, []input.EventType{input.AllEvents},
-			func(_ context.Context, ev input.Event) { got = append(got, ev) }, nil); err != nil {
+			func(_ context.Context, ev input.Event) { rec.add(ev) }, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return kb, &got
+	return kb, rec
 }
 
 func value(t *testing.T, kb *keyboard, c input.Control) float64 {
@@ -149,7 +176,7 @@ func TestMappingArrows(t *testing.T) {
 }
 
 func TestOppositeKeysCancel(t *testing.T) {
-	kb, got := newTestKB(t, Config{})
+	kb, rec := newTestKB(t, Config{})
 	key(t, kb, "KeyW", true)
 	key(t, kb, "KeyS", true)
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
@@ -159,7 +186,7 @@ func TestOppositeKeysCancel(t *testing.T) {
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 1 {
 		t.Fatalf("only S held: Hat0Y = %v, want 1", v)
 	}
-	for _, ev := range *got {
+	for _, ev := range rec.events() {
 		if ev.Control == input.AbsoluteHat0Y && ev.Event != input.PositionChangeAbs && ev.Event != input.Connect {
 			t.Errorf("hat emitted %s, want PositionChangeAbs", ev.Event)
 		}
@@ -167,12 +194,12 @@ func TestOppositeKeysCancel(t *testing.T) {
 }
 
 func TestRepeatPressEmitsNothing(t *testing.T) {
-	kb, got := newTestKB(t, Config{})
+	kb, rec := newTestKB(t, Config{})
 	key(t, kb, "KeyW", true)
-	n := len(*got)
+	n := len(rec.events())
 	key(t, kb, "KeyW", true)
-	if len(*got) != n {
-		t.Fatalf("repeat press emitted %d events", len(*got)-n)
+	if len(rec.events()) != n {
+		t.Fatalf("repeat press emitted %d events", len(rec.events())-n)
 	}
 }
 
@@ -195,19 +222,19 @@ func TestTwoSourcesUnion(t *testing.T) {
 }
 
 func TestEStopClearsAllAndEmitsPress(t *testing.T) {
-	kb, got := newTestKB(t, Config{})
+	kb, rec := newTestKB(t, Config{})
 	key(t, kb, "KeyW", true)
 	if err := web(kb, "KeyQ", input.ButtonPress); err != nil {
 		t.Fatal(err)
 	}
-	*got = nil
+	rec.reset()
 	key(t, kb, "Space", true)
 	want := map[input.Control]input.Event{
 		input.AbsoluteHat0Y: {Event: input.PositionChangeAbs, Value: 0},
 		input.ButtonLT:      {Event: input.ButtonRelease, Value: 0},
 		input.ButtonEStop:   {Event: input.ButtonPress, Value: 1},
 	}
-	for _, ev := range *got {
+	for _, ev := range rec.events() {
 		w, ok := want[ev.Control]
 		if !ok {
 			t.Errorf("unexpected event %+v", ev)
@@ -228,14 +255,14 @@ func TestEStopClearsAllAndEmitsPress(t *testing.T) {
 }
 
 func TestConnectSweepReemitsHeld(t *testing.T) {
-	kb, got := newTestKB(t, Config{})
+	kb, rec := newTestKB(t, Config{})
 	if err := web(kb, "KeyW", input.ButtonPress); err != nil {
 		t.Fatal(err)
 	}
-	*got = nil
+	rec.reset()
 	kb.deviceConnected(context.Background())
 	sawConnect, sawReemit := false, false
-	for _, ev := range *got {
+	for _, ev := range rec.events() {
 		if ev.Control == input.AbsoluteHat0Y && ev.Event == input.Connect {
 			sawConnect = true
 		}
@@ -261,11 +288,11 @@ func TestConnectSweepReemitsHeld(t *testing.T) {
 // action, actForward, so an unrecognized keystroke would command forward
 // motion.
 func TestEvdevIgnoresUnmappedCode(t *testing.T) {
-	kb, got := newTestKB(t, Config{Layout: "wasd"})
-	*got = nil
+	kb, rec := newTestKB(t, Config{Layout: "wasd"})
+	rec.reset()
 	kb.evdevKey(context.Background(), "ArrowUp", true, time.Now())
-	if len(*got) != 0 {
-		t.Fatalf("unmapped code emitted %d events: %+v", len(*got), *got)
+	if len(rec.events()) != 0 {
+		t.Fatalf("unmapped code emitted %d events: %+v", len(rec.events()), rec.events())
 	}
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
 		t.Fatalf("unmapped code moved Hat0Y to %v, want 0", v)
@@ -273,12 +300,12 @@ func TestEvdevIgnoresUnmappedCode(t *testing.T) {
 }
 
 func TestDeviceLostReleasesEvdevKeys(t *testing.T) {
-	kb, got := newTestKB(t, Config{})
+	kb, rec := newTestKB(t, Config{})
 	key(t, kb, "KeyW", true)
 	if err := web(kb, "KeyQ", input.ButtonPress); err != nil {
 		t.Fatal(err)
 	}
-	*got = nil
+	rec.reset()
 	kb.deviceLost(context.Background())
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
 		t.Fatalf("Hat0Y = %v, want 0 after device lost", v)
@@ -288,7 +315,7 @@ func TestDeviceLostReleasesEvdevKeys(t *testing.T) {
 	}
 	// Order: zero axis, then Disconnect sweep, then LT re-emitted.
 	idxZero, idxDisc, idxRe := -1, -1, -1
-	for i, ev := range *got {
+	for i, ev := range rec.events() {
 		switch {
 		case ev.Control == input.AbsoluteHat0Y && ev.Event == input.PositionChangeAbs && idxZero < 0:
 			idxZero = i
@@ -333,12 +360,12 @@ func TestTriggerEventRejectsUnknown(t *testing.T) {
 }
 
 func TestHoldIsKeepaliveOnly(t *testing.T) {
-	kb, got := newTestKB(t, Config{})
-	*got = nil
+	kb, rec := newTestKB(t, Config{})
+	rec.reset()
 	if err := web(kb, "KeyW", input.ButtonHold); err != nil {
 		t.Fatal(err)
 	}
-	if len(*got) != 0 || value(t, kb, input.AbsoluteHat0Y) != 0 {
+	if len(rec.events()) != 0 || value(t, kb, input.AbsoluteHat0Y) != 0 {
 		t.Fatal("Hold for a key never pressed created a press")
 	}
 	_ = web(kb, "KeyW", input.ButtonPress)
@@ -366,8 +393,9 @@ func TestTriggerEventUsesServerClock(t *testing.T) {
 		}
 	}
 	kb.mu.Lock()
-	kb.expireWebLocked(context.Background(), time.Now())
+	kb.expireWebLocked(time.Now())
 	kb.mu.Unlock()
+	kb.flush(context.Background())
 	if v := value(t, kb, input.AbsoluteHat0Y); v != -1 {
 		t.Fatalf("epoch-timed press expired immediately: Hat0Y = %v", v)
 	}
@@ -390,8 +418,9 @@ func TestTriggerEventIgnoresSkewedClientClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	kb.mu.Lock()
-	kb.expireWebLocked(context.Background(), time.Now())
+	kb.expireWebLocked(time.Now())
 	kb.mu.Unlock()
+	kb.flush(context.Background())
 	if v := value(t, kb, input.AbsoluteHat0Y); v != -1 {
 		t.Fatalf("skewed-but-valid client time expired press early: Hat0Y = %v, want -1", v)
 	}
@@ -403,14 +432,14 @@ func TestTriggerEventIgnoresSkewedClientClock(t *testing.T) {
 // becomes observable (a bare repeat with nothing else held would look
 // identical either way, since the first Space press already cleared it).
 func TestRepeatEStopPressDoesNotReclear(t *testing.T) {
-	kb, got := newTestKB(t, Config{})
+	kb, rec := newTestKB(t, Config{})
 	key(t, kb, "KeyW", true)
 	key(t, kb, "Space", true) // first EStop press: clears W, holds EStop
 	key(t, kb, "KeyW", true)  // W held again while EStop is still down
-	*got = nil
+	rec.reset()
 	key(t, kb, "Space", true) // repeat EStop press: refresh only
-	if len(*got) != 0 {
-		t.Fatalf("repeat EStop press emitted %d events, want 0: %+v", len(*got), *got)
+	if len(rec.events()) != 0 {
+		t.Fatalf("repeat EStop press emitted %d events, want 0: %+v", len(rec.events()), rec.events())
 	}
 	kb.mu.Lock()
 	_, held := kb.held[srcEvdev][actForward]
@@ -482,8 +511,9 @@ func TestWatchdogExpiresWebOnly(t *testing.T) {
 	_ = web(kb, "KeyW", input.ButtonPress)
 	key(t, kb, "KeyQ", true)
 	kb.mu.Lock()
-	kb.expireWebLocked(context.Background(), time.Now().Add(61*time.Second))
+	kb.expireWebLocked(time.Now().Add(61 * time.Second))
 	kb.mu.Unlock()
+	kb.flush(context.Background())
 	if v := value(t, kb, input.AbsoluteHat0Y); v != 0 {
 		t.Fatalf("web W not expired: Hat0Y = %v", v)
 	}
@@ -581,5 +611,114 @@ func TestNonLinuxRejectsDevFile(t *testing.T) {
 		&Config{DevFile: "/dev/input/event0", HoldTimeoutMs: intp(0)}, logging.NewTestLogger(t))
 	if err == nil {
 		t.Fatal("dev_file accepted on non-linux")
+	}
+}
+
+// TestRegisterNotBlockedBySlowCallback pins the fix for a consumer hanging in
+// RegisterControlCallback. Dispatch used to run while the controller's mutex
+// was held, so a subscriber whose callback blocked (an RDK StreamEvents
+// ctrlFunc whose stream died, with a full 1024-slot channel) stalled every
+// later registration behind the same lock.
+func TestRegisterNotBlockedBySlowCallback(t *testing.T) {
+	kb, _ := newTestKB(t, Config{})
+	ctx := context.Background()
+
+	blocking := make(chan struct{})
+	if err := kb.RegisterControlCallback(ctx, input.AbsoluteHat0Y,
+		[]input.EventType{input.PositionChangeAbs},
+		func(context.Context, input.Event) { <-blocking }, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Join the dispatching goroutine before returning, or it logs after the
+	// test completes and races the testing package.
+	dispatched := make(chan struct{})
+	go func() {
+		defer close(dispatched)
+		_ = web(kb, "KeyW", input.ButtonPress)
+	}()
+	defer func() {
+		close(blocking)
+		<-dispatched
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- kb.RegisterControlCallback(ctx, input.AbsoluteHat0X,
+			[]input.EventType{input.PositionChangeAbs},
+			func(context.Context, input.Event) {}, nil)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("register returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RegisterControlCallback blocked behind a slow subscriber's callback")
+	}
+}
+
+// TestTwoSubscribersBothReceive pins that independent consumers coexist. Each
+// gRPC stream registers with its own context; a second consumer used to
+// overwrite the first, which silently stopped the first from receiving.
+func TestTwoSubscribersBothReceive(t *testing.T) {
+	kb, _ := newTestKB(t, Config{})
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+
+	var mu sync.Mutex
+	var a, b int
+	_ = kb.RegisterControlCallback(ctxA, input.AbsoluteHat0Y,
+		[]input.EventType{input.PositionChangeAbs},
+		func(context.Context, input.Event) { mu.Lock(); a++; mu.Unlock() }, nil)
+	_ = kb.RegisterControlCallback(ctxB, input.AbsoluteHat0Y,
+		[]input.EventType{input.PositionChangeAbs},
+		func(context.Context, input.Event) { mu.Lock(); b++; mu.Unlock() }, nil)
+
+	_ = web(kb, "KeyW", input.ButtonPress)
+	mu.Lock()
+	defer mu.Unlock()
+	if a == 0 || b == 0 {
+		t.Fatalf("subscriber A got %d events, B got %d; both should receive", a, b)
+	}
+}
+
+// TestDepartedSubscriberDropped pins that a consumer whose context is done is
+// neither called nor left occupying a slot. The RDK never deregisters a
+// callback when its stream dies.
+func TestDepartedSubscriberDropped(t *testing.T) {
+	kb, _ := newTestKB(t, Config{})
+	gone, cancel := context.WithCancel(context.Background())
+
+	var mu sync.Mutex
+	calls := 0
+	_ = kb.RegisterControlCallback(gone, input.AbsoluteHat0Y,
+		[]input.EventType{input.PositionChangeAbs},
+		func(context.Context, input.Event) { mu.Lock(); calls++; mu.Unlock() }, nil)
+
+	_ = web(kb, "KeyW", input.ButtonPress)
+	mu.Lock()
+	before := calls
+	mu.Unlock()
+	if before == 0 {
+		t.Fatal("live subscriber received nothing")
+	}
+
+	cancel() // the consumer goes away without deregistering
+	_ = web(kb, "KeyW", input.ButtonRelease)
+	_ = web(kb, "KeyW", input.ButtonPress)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != before {
+		t.Fatalf("departed subscriber still called: %d -> %d", before, calls)
+	}
+	kb.mu.Lock()
+	defer kb.mu.Unlock()
+	if n := len(kb.callbacks[input.AbsoluteHat0Y][input.PositionChangeAbs]); n != 0 {
+		t.Fatalf("departed subscriber still holds %d slot(s)", n)
 	}
 }
