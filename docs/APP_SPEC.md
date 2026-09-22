@@ -111,7 +111,11 @@ frontend/
     panels/KeyLegend.svelte
 ```
 
-Dependencies: `@viamrobotics/sdk`, `@viamrobotics/svelte-sdk`, `js-cookie`.
+Dependencies: `@viamrobotics/sdk` and `js-cookie`. Not
+`@viamrobotics/svelte-sdk`, which `teach-frames` needs because many components
+deep in its tree each want their own reactive resource client; here `App.svelte`
+owns the one machine, the one controller client and the one stream. Dropping it
+also drops `@tanstack/svelte-query`.
 Dev: `svelte`, `@sveltejs/vite-plugin-svelte`, `vite`, `vitest`, `jsdom`,
 `typescript`, `svelte-check`, `@types/js-cookie`.
 
@@ -222,9 +226,9 @@ re-acquired when the page becomes visible again — without that, the video goes
 permanently black after the first tab switch. "none" renders a placeholder and
 starts nothing.
 
-Whether `@viamrobotics/svelte-sdk` exposes a stream helper is an
-implementation-time question; if it does, use it, otherwise `StreamClient` from
-`@viamrobotics/sdk` directly.
+Whether `@viamrobotics/sdk` exposes a helper that already owns this lifecycle
+is an implementation-time question; if it does, use it, otherwise drive
+`StreamClient` directly.
 
 ### Key legend
 
@@ -341,6 +345,8 @@ Manual:
   are cheaper to show than to hide and re-reveal.
 - No `prime-core`, no Tailwind. Four widgets do not need a design system.
 - npm over pnpm, so `setup.sh` installs one tool instead of two.
+- Raw `@viamrobotics/sdk` over `@viamrobotics/svelte-sdk`. One machine, one
+  controller client, one stream, all owned by the root component.
 - The app's release-on-blur is a latency optimisation, not the safety
   mechanism. The server-side watchdog remains the guarantee.
 - The keepalive interval is derived from the component's `hold_timeout_ms`
