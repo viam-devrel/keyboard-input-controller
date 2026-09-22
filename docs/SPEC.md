@@ -296,11 +296,12 @@ Any TypeScript SDK client is a valid keyboard. The contract:
 `preventDefault` matters for the `arrows` layout, where arrows and Space
 otherwise scroll the page. This holds only while that layout is active;
 arrows are not `preventDefault`ed under `wasd`. The shipped page also scopes
-capture to outside its `<form id="f">` (`e.target.closest("#f")`) on both
-`keydown` and `keyup`, so typing into the host/API key fields never registers
-as gameplay input; `keyup`'s release still runs even when the key originated
-inside the form, since suppressing `preventDefault` there would break
-Space-activating the Connect button.
+capture to outside its settings bar (`e.target.closest('[data-settings]')`,
+`frontend/src/lib/driver.ts`) on both `keydown` and `keyup`, so operating the
+controller/camera `<select>`s in `SettingsBar.svelte` never registers as
+gameplay input; `keyup`'s release still runs even when the key originated
+inside the settings bar, since suppressing `preventDefault` there would break
+using arrow keys and Space to operate a focused `<select>`.
 
 ```ts
 import { createRobotClient, InputControllerClient } from "@viamrobotics/sdk";
@@ -339,9 +340,10 @@ addEventListener("beforeunload", releaseAll);
 document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
 ```
 
-`MAPPED` above is shown as the union of both layouts for brevity; the page
-itself sends only the keys of the layout selected in its form, since
-`TriggerEvent` rejects keys outside the module's configured layout.
+`MAPPED` above is shown as the union of both layouts for brevity; the shipped
+app instead probes `get_layout` and sends only the keys of whichever layout
+the component is actually configured with, since `TriggerEvent` rejects keys
+outside the module's configured layout.
 
 Shipped as the `frontend/` app: a Svelte app bundled in the module and
 registered as a Viam application (`docs/APP_SPEC.md`), which connects using

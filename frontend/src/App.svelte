@@ -91,7 +91,16 @@
       // defaulted when there was no record at all for this machine. This is
       // an application of a default, not a user choice, so it deliberately
       // does not set settingsReady (see its declaration above).
-      camera = saved === null ? (cameras[0] ?? null) : saved.camera
+      if (saved === null) {
+        camera = cameras[0] ?? null
+      } else if (saved.camera !== null && !cameras.includes(saved.camera)) {
+        // Falls back to null, not cameras[0]: defaulting to the first camera
+        // would resurrect one the user deliberately set to "none".
+        camera = null
+        status += ` — camera "${saved.camera}" is no longer on this machine, using "none"`
+      } else {
+        camera = saved.camera
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       status = `could not connect: ${message}`

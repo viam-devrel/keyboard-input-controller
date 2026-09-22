@@ -80,6 +80,12 @@ Any Viam TypeScript SDK client can be a keyboard. Send raw browser
 | `ButtonRelease` | key up |
 | `ButtonHold` | keepalive, send every ~200ms while held |
 
+The 200ms figure assumes the default `hold_timeout_ms` (500); a client should
+scale its keepalive interval to the configured window rather than hardcode
+200ms, or a shorter `hold_timeout_ms` (e.g. 100) gets the key
+watchdog-released mid-hold. The bundled app derives it via `keepaliveFor` in
+`frontend/src/lib/driver.ts`.
+
 The module ignores client timestamps. If keepalives stop for
 `hold_timeout_ms`, the key is released server-side.
 
@@ -90,7 +96,12 @@ layout selector to keep in sync by hand.
 A ready-made application ships with this module: the "keyboard-teleop" Viam
 application, registered in `meta.json` and built from `frontend/`. Open it
 from the machine's Viam app page, pick the `devrel:keyboard:input` component
-and a camera, and hold keys. Design: `docs/APP_SPEC.md`.
+and a camera, and hold keys. Design: `docs/APP_SPEC.md`. Changing the
+component's `layout` while the app is already open doesn't recover on its
+own — the WebRTC connection survives the config change, so the app never
+re-probes `get_layout` and keeps sending the old codes (rejected with
+`unknown key ... for this layout` per keystroke); reload the page to pick up
+the new layout.
 
 ### DoCommand
 

@@ -49,6 +49,16 @@ describe('keepaliveFor', () => {
     expect(keepaliveFor(6000)).toBe(200) // capped by the ceiling
     expect(keepaliveFor(0)).toBe(200)    // watchdog disabled
   })
+
+  // get_layout crosses a trust boundary (version-skewed or third-party
+  // module) the same way settings.ts's stored selection does; a partial
+  // response must not reach setInterval as NaN, which the browser treats as
+  // a ~0ms floor and turns into an unbounded triggerEvent hot loop.
+  it('falls back to the ceiling for a non-finite or negative window', () => {
+    expect(keepaliveFor(NaN)).toBe(200)
+    expect(keepaliveFor(undefined as unknown as number)).toBe(200)
+    expect(keepaliveFor(-500)).toBe(200)
+  })
 })
 
 describe('createDriver', () => {

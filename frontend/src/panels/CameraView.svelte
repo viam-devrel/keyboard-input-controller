@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { StreamClient, type RobotClient } from '@viamrobotics/sdk'
+  import { MachineConnectionEvent, StreamClient, type RobotClient } from '@viamrobotics/sdk'
   import { untrack } from 'svelte'
 
   let { client, name }: { client: RobotClient; name: string | null } = $props()
@@ -14,7 +14,8 @@
     const selected = name
     if (!selected) return
 
-    const streamClient = new StreamClient(untrack(() => client))
+    const currentClient = untrack(() => client)
+    const streamClient = new StreamClient(currentClient)
     // Local to this effect run: a switch to a different camera tears this
     // run down (see the returned cleanup) before the next run starts, so a
     // stale run's own `live` flag — not a shared one — is what tells its
@@ -79,9 +80,21 @@
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
 
+    // A reconnect's old MediaStream tracks are dead but stay attached to the
+    // element — nothing else re-runs this effect (it depends only on `name`),
+    // so without this the video goes black permanently after a WebRTC drop
+    // and recovery, while the rest of the app reports "armed" again.
+    const onReconnected = () => {
+      teardown()
+      live = true
+      void acquire()
+    }
+    currentClient.on(MachineConnectionEvent.CONNECTED, onReconnected)
+
     return () => {
       live = false
       document.removeEventListener('visibilitychange', onVisibilityChange)
+      currentClient.off(MachineConnectionEvent.CONNECTED, onReconnected)
       teardown()
     }
   })

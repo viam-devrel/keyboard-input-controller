@@ -38,7 +38,7 @@ module.tar.gz: meta.json $(MODULE_BINARY) frontend
 ifneq ($(VIAM_TARGET_OS), windows)
 	strip $(MODULE_BINARY)
 endif
-	tar czf $@ $(TAR_FILES)
+	tar --exclude='.DS_Store' -czf $@ $(TAR_FILES)
 
 module: test module.tar.gz
 

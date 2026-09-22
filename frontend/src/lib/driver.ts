@@ -35,7 +35,12 @@ const MAX_KEEPALIVE_MS = 200
 // window; the floor bounds the request rate, the ceiling caps it for long
 // windows. 0 means the watchdog is disabled, so any interval is safe.
 export function keepaliveFor(holdTimeoutMs: number): number {
-  if (holdTimeoutMs <= 0) return MAX_KEEPALIVE_MS
+  // Same trust boundary settings.ts validates: get_layout's response crosses
+  // a version-skew/third-party-module boundary, so `holdTimeoutMs` cannot be
+  // trusted to be a positive finite number. NaN/undefined would otherwise
+  // propagate through Math.floor/max/min into setInterval, which treats a NaN
+  // delay as 0 — an unbounded fire-and-forget triggerEvent hot loop.
+  if (!Number.isFinite(holdTimeoutMs) || holdTimeoutMs <= 0) return MAX_KEEPALIVE_MS
   const third = Math.floor(holdTimeoutMs / 3)
   return Math.min(MAX_KEEPALIVE_MS, Math.max(MIN_KEEPALIVE_MS, third))
 }

@@ -32,7 +32,7 @@ camera view so the operator can watch the robot while driving it.
 
 ## Module change: `DoCommand`
 
-`DoCommand` is currently unimplemented. It gains exactly one command.
+`DoCommand` implements exactly one command.
 
 Request: any map containing the key `get_layout`. Response:
 
