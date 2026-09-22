@@ -1,8 +1,6 @@
 {
   "name": "keyboard-teleop",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
   "scripts": {
     "test": "vitest run",
     "dev": "vite",
@@ -10,9 +8,6 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "type": "module",
   "private": true,
   "dependencies": {
