@@ -32,6 +32,12 @@ export function currentMachine(): MachineIdentity {
       'this page must be opened from its Viam application URL (expected /machine/{id}/...)',
     )
   }
+  // Both "unparseable" and "wrong shape" below are the same failure to the
+  // user, so they share one message rather than drifting apart.
+  const damaged = () =>
+    new Error(
+      `the stored session for machine ${id} is damaged — clear site data for this page and re-open it from app.viam.com`,
+    )
   const raw = Cookies.get(id)
   if (!raw) {
     throw new Error(
@@ -42,9 +48,7 @@ export function currentMachine(): MachineIdentity {
   try {
     cookie = JSON.parse(raw) as MachineCookie
   } catch {
-    throw new Error(
-      `the stored session for machine ${id} is damaged — clear site data for this page and re-open it from app.viam.com`,
-    )
+    throw damaged()
   }
   // JSON.parse plus `as MachineCookie` only asserts the shape at compile
   // time; a cookie missing or mistyping a field parses fine and would
@@ -52,9 +56,7 @@ export function currentMachine(): MachineIdentity {
   // undefined`), surfacing later as an opaque SDK connection error instead
   // of this message.
   if (typeof cookie.hostname !== 'string' || typeof cookie.credentials !== 'object' || cookie.credentials === null) {
-    throw new Error(
-      `the stored session for machine ${id} is damaged — clear site data for this page and re-open it from app.viam.com`,
-    )
+    throw damaged()
   }
   return {
     id,
