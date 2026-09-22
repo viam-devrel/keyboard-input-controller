@@ -311,6 +311,11 @@ Unit, `vitest`, on `lib/driver.ts` with a fake sink and fake timers:
 - `stop()` clears the interval and releases.
 - A press of the stop code empties `held` of everything except the stop code and
   sends no `release` calls.
+- An autorepeat `keydown` for a key the EStop cleared does not re-press it. This
+  is the one path where `e.repeat` is load-bearing rather than shadowed by the
+  already-held check, and it is the most safety-relevant line in the file.
+- `stop()` leaves no interval ticking (observable only by pressing again after
+  it), and a second `start()` does not double the keepalive rate.
 - `keepaliveMs` derivation: 500 gives 166, 100 gives 33, 50 gives 20 (the
   floor, since 50 is `Validate`'s minimum and 50/3 is below it), 0 gives 200.
 
