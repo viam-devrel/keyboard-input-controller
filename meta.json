@@ -22,7 +22,7 @@
     "arch": [
       "linux/amd64",
       "linux/arm64",
-      "linux/arm",
+      "windows/amd64",
       "darwin/arm64"
     ],
     "darwin_deps": [
