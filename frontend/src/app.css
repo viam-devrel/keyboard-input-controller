@@ -1,0 +1,27 @@
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.4 system-ui, sans-serif;
+  background: #111;
+  color: #eee;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+kbd {
+  display: inline-block;
+  padding: .1rem .4rem;
+  border: 1px solid #666;
+  border-radius: .25rem;
+  margin: .1rem;
+  font-family: monospace;
+  background: #222;
+  color: #eee;
+}

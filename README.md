@@ -35,15 +35,21 @@ Design details: `docs/SPEC.md`.
 
 | Control | `wasd` | `arrows` | Value |
 |---|---|---|---|
-| `AbsoluteHat0Y` | W / S | ↑ / ↓ | -1 forward, +1 back |
-| `AbsoluteHat0X` | A / D | ← / → | -1 left, +1 right |
-| `ButtonLT` | Q | Left Shift | Z down |
-| `ButtonRT` | E | Right Shift | Z up |
+| `AbsoluteHat0Y` | W / S | ↑ / ↓ | -1 `hat_y_neg`, +1 `hat_y_pos` |
+| `AbsoluteHat0X` | A / D | ← / → | -1 `hat_x_neg`, +1 `hat_x_pos` |
+| `ButtonLT` | Q | Left Shift | `trigger_left` |
+| `ButtonRT` | E | Right Shift | `trigger_right` |
 | `ButtonWest` | Z | Left Ctrl | gripper close (emitted; not consumed by `arm-remote-control`) |
 | `ButtonEast` | C | Right Ctrl | gripper open (emitted; not consumed by `arm-remote-control`) |
 | `ButtonEStop` | Space | Space | releases every held key |
 
 Axes are digital (-1, 0, +1). Opposite keys held together give 0.
+
+These names describe the control a key drives, never a physical direction:
+the module has no idea which reference frame a consumer (e.g.
+`arm-remote-control`) maps its controls onto, so it cannot honestly claim
+"forward" or "up". `gripper_open`/`gripper_close` and `stop` are the
+exceptions, kept semantic because they mean the same thing in any frame.
 
 With `hipsterbrown:arm-remote-control`, only `AbsoluteHat0X/Y` and
 `ButtonLT/RT` are consumed. Space does not call `arm.Stop()`: releasing
@@ -80,15 +86,37 @@ Any Viam TypeScript SDK client can be a keyboard. Send raw browser
 | `ButtonRelease` | key up |
 | `ButtonHold` | keepalive, send every ~200ms while held |
 
+The 200ms figure assumes the default `hold_timeout_ms` (500); a client should
+scale its keepalive interval to the configured window rather than hardcode
+200ms, or a shorter `hold_timeout_ms` (e.g. 100) gets the key
+watchdog-released mid-hold. The bundled app derives it via `keepaliveFor` in
+`frontend/src/lib/driver.ts`.
+
 The module ignores client timestamps. If keepalives stop for
 `hold_timeout_ms`, the key is released server-side.
 
-`TriggerEvent` rejects keys outside the configured layout, so the page's
-layout selector must match the module's `layout` attribute.
+`TriggerEvent` rejects keys outside the configured layout; the shipped app
+reads the layout automatically via `get_layout` (see below), so there is no
+layout selector to keep in sync by hand.
 
-A ready-made page is in `examples/web/index.html`. Open it, enter the
-machine host and an API key, click Connect, and hold keys.
+A ready-made application ships with this module: the "keyboard-teleop" Viam
+application, registered in `meta.json` and built from `frontend/`. Open it
+from the machine's Viam app page, pick the `devrel:keyboard:input` component
+and a camera, and hold keys. Design: `docs/APP_SPEC.md`. Changing the
+component's `layout` while the app is already open doesn't recover on its
+own — the WebRTC connection survives the config change, so the app never
+re-probes `get_layout` and keeps sending the old codes (rejected with
+`unknown key ... for this layout` per keystroke); reload the page to pick up
+the new layout.
 
 ### DoCommand
 
-Not implemented.
+`get_layout`: returns the component's layout name, resolved
+`hold_timeout_ms`, and an `actions` array — for each action, the key that
+drives it, the `input.Control` a consumer receives while it's held, and the
+value that control carries. It reports controls rather than physical
+directions on purpose: the module has no idea which reference frame the
+consumer maps those controls onto, so it cannot honestly claim "forward" or
+"up" — see the "Controls" table above. See `docs/APP_SPEC.md` "Module
+change: `DoCommand`" for the exact request/response shape. Any other command
+returns `resource.ErrDoUnimplemented`.
