@@ -890,8 +890,10 @@ git commit -m "feat: add machine identity and per-machine selection storage"
 The first task that produces something runnable end to end. No new unit tests — this is wiring over tested parts, and Task 8's manual pass covers it.
 
 **Files:**
-- Modify: `frontend/src/App.svelte`, `frontend/src/app.css`
+- Modify: `frontend/src/App.svelte`
 - Create: `frontend/src/panels/SettingsBar.svelte`
+
+`app.css` needs nothing: the scaffold's `#app` flex column already carries the shell layout.
 
 - [ ] **Step 1: Write `SettingsBar.svelte`**
 
@@ -902,11 +904,11 @@ Presentational only. Props: `controllers: string[]`, `cameras: string[]`, and bi
 In order:
 
 1. `currentMachine()` in a `try`/`catch`. On throw, render the message as the whole page and stop.
-2. `createRobotClient(dialConf)`, then `machine.resourceNames()`; filter to `subtype === 'input_controller'` and `subtype === 'camera'`, mapping to `.name`.
+2. `createRobotClient(dialConf)`, then `machine.resourceNames()`; filter to `subtype === 'input_controller'` and `subtype === 'camera'`, mapping to `.name`. Hold the client in `$state`, not a plain `let` — the arming effect reads it, and an untracked `let` makes arming depend on the accident that the client is assigned before the `controller` write that schedules the re-run. Reordering those two lines would silently stop the app arming at all, with nothing for a build or typecheck to catch.
 3. `load(machineId)` once. It returns `null` when this browser has no record, which is what separates "never chose" from "chose no camera":
    - **controller**: `resolve(saved?.controller ?? null, controllers)`. When `resolve` falls back because the saved name is gone, say so in the status line — "`<saved>` is no longer on this machine, using `<first>`". This matters more than it looks: the `get_layout` probe catches a substitute that is not a keyboard component, but a machine with two of them (`keyboard-base`, `keyboard-arm`) probes clean and the app silently arms the wrong one. The user presses W and a different subsystem moves.
    - **camera**: honour a record verbatim, including `camera: null` meaning none. Only default to the first camera when `load` returned `null`. Do not run `resolve` on it.
-   - **saving**: write both fields from a single `$effect` over both values, never per-select-handler. `save` takes a whole `Selection`, so a handler that writes one field wipes the other.
+   - **saving**: write both fields from a single `$effect` over both values, never per-select-handler. `save` takes a whole `Selection`, so a handler that writes one field wipes the other. Only start persisting once the user actually changes a select (an `onchange` prop on `SettingsBar`), never right after applying defaults — otherwise a machine with no cameras at first load persists `camera: null`, which permanently reads as "chose none" and stops a camera added later from ever being defaulted to.
 4. `$effect` on the selected controller: build an `InputControllerClient`, call `doCommand({ get_layout: true })`. On success store `{layout, keys, hold_timeout_ms}` and arm. On failure set the error state whose text names both causes — not a `devrel:keyboard:input`, or a module too old to have `get_layout`.
 5. When armed, build the sink and the driver:
 
@@ -923,17 +925,29 @@ const driver = createDriver(sink, keys, keepaliveFor(holdTimeoutMs))
 driver.start()
 ```
 
-6. Disconnect handling, which is APP_SPEC's "Connection lost" row. The
-   installed SDK does expose this — `MachineConnectionEvent.DISCONNECTING` and
-   `DISCONNECTED` in `@viamrobotics/sdk/dist/events.d.ts` — so wire those to
-   `releaseAll()` + disarm + a status line, and re-arm on the reconnect
-   counterpart. No need for a rejected-`triggerEvent` fallback. The server
-   watchdog remains the safety guarantee; this row is about the UI not lying
-   about being connected. Note that `stop()` is the only way to clear the
-   driver's local `held` (so the legend stops lying), and on a dead connection
-   its release calls will reject — `reportOnce` swallows them and that is
-   correct, not a bug. Say so where it happens, or the rejected promises read
-   as one.
+6. Disconnect handling, which is APP_SPEC's "Connection lost" row. **Use the
+   events the SDK actually emits, not the ones its enum declares.** Read the
+   emit sites in `@viamrobotics/sdk/dist/main.es.js`, not `events.d.ts`:
+   `Client.onDisconnect()` emits `DISCONNECTED` only when `noReconnect` is set
+   or the client is already `closed`, neither of which is true here — a real
+   mid-session drop takes the default path and emits **`RECONNECTING`**, and
+   when backoff gives up, **`RECONNECTION_FAILED`** (terminal; say so, the
+   remedy is a reload). Wire those to `releaseAll()` + disarm + a status line.
+   `DISCONNECTING`/`DISCONNECTED` are worth keeping for the explicit-close
+   case. `CONNECTED` is the correct re-arm signal and cannot fire spuriously on
+   the initial connection, because it is emitted inside `connect()` before
+   `createRobotClient` resolves.
+
+   Re-arm by re-running the effect (bump an `armGeneration` `$state` the effect
+   reads), not by reusing the captured `get_layout` response: a component
+   reconfigured while disconnected would otherwise keep the old keymap *and the
+   old keepalive interval*, and a now-shorter `hold_timeout_ms` means the
+   watchdog releases keys that are still physically down.
+
+   `releaseAll()` clears the driver's local `held`, so the legend stops lying.
+   Its release calls will reject on a dead connection — gate `reportOnce` on
+   `armed` so those rejections do not overwrite the very "connection lost"
+   message they accompany.
 7. Window listeners: `keydown`/`keyup` to the driver, `blur` and `beforeunload` to `releaseAll`, `document` `visibilitychange` to `releaseAll` when `document.hidden`. Return a teardown from the `$effect` that removes them and calls `driver.stop()`, so re-selecting a controller releases under the old keymap before arming the new one.
 8. `heldCodes = [...driver.held]` as `$state`, for the legend highlight — the
    driver's `held` is a plain `Set` and Svelte does not track it. There are five
@@ -978,7 +992,7 @@ const LABELS: Record<string, string> = {
 
 Any action in `keys` that is not in `ORDER` renders last with its raw name as the label, so a module that adds an action degrades rather than hides it. A row whose code is in `held` gets the `.held` class, defined in the component's own scoped `<style>` — `app.css` carries only the base `kbd` rule.
 
-- [ ] **Step 2: Render it from `App.svelte`** when armed, passing `heldCodes`.
+- [ ] **Step 2: Render it from `App.svelte`** when armed, passing `heldCodes`. Set `layout = null` alongside `armed = false` in the effect's disarm branch, so the legend can never show a keymap for a controller that is not armed.
 
 - [ ] **Step 3: Verify**
 
@@ -1105,6 +1119,11 @@ Per `docs/APP_SPEC.md` "Testing":
 7. Deploy and open the published app URL. Confirm the cookie path works
    unchanged from `local-app-testing` — this is the only check that exercises
    the real Viam app host.
+8. **Drop the connection mid-session** — hold W, then kill wifi. Confirm the
+   status line stops claiming armed and the keys release. This one cannot be
+   trusted from a code read: the plan originally named the wrong SDK events
+   here (the enum declares `DISCONNECTED`, but a live drop emits
+   `RECONNECTING`), so the whole row was dead code until a review caught it.
 
 Record the results. Do not claim this task done on a build alone; steps 2, 3 and 6 are the whole safety argument and none of them are covered by a unit test.
 
