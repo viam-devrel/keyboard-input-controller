@@ -22,15 +22,29 @@
     // element a newer selection now owns.
     let live = true
     let currentStream: MediaStream | null = null
+    // Set before the attempt, not after it: getStream() sends AddStream
+    // first, so by the time it can fail the robot may already be encoding.
+    // Failing this flag "on" costs at most one rejected remove() for a
+    // stream the server never had; failing it "off" leaves the robot
+    // encoding for a camera nobody is watching, which is the leak this
+    // whole flag exists to close.
+    let added = false
 
     const teardown = () => {
       currentStream?.getTracks().forEach((track) => track.stop())
       currentStream = null
       if (videoEl) videoEl.srcObject = null
+      // track.stop() only tears down the local end — the robot keeps
+      // encoding for `selected` until the server is told to stop.
+      if (added) {
+        added = false
+        void streamClient.remove(selected).catch(() => {})
+      }
     }
 
     const acquire = async () => {
       try {
+        added = true
         const stream = await streamClient.getStream(selected)
         if (!live) {
           // Abandoned mid-flight (camera switched or tab hidden before this
@@ -38,6 +52,11 @@
           stream.getTracks().forEach((track) => track.stop())
           return
         }
+        // Idempotent: an earlier still-in-flight acquire (e.g. a fast
+        // hide/show/hide/show while getStream is slow) can resolve after
+        // this one and land here too. Stop whatever is currently held
+        // before taking ownership so an earlier stream is never orphaned.
+        currentStream?.getTracks().forEach((track) => track.stop())
         currentStream = stream
         if (videoEl) videoEl.srcObject = stream
       } catch {
