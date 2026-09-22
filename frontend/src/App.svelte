@@ -9,7 +9,7 @@
   import { load, resolve, save } from './lib/settings'
   import { createDriver, keepaliveFor, type Sink } from './lib/driver'
   import SettingsBar from './panels/SettingsBar.svelte'
-  // Task 6 adds <KeyLegend keys={layout?.keys} held={heldCodes} /> here.
+  import KeyLegend from './panels/KeyLegend.svelte'
   // Task 7 adds <CameraView client={robotClient} name={camera} /> here.
 
   interface Layout {
@@ -120,6 +120,7 @@
     armGeneration
     if (!selected || !client) {
       armed = false
+      layout = null
       return
     }
     // Reset immediately: the async get_layout round-trip below must not
@@ -271,6 +272,9 @@
     onchange={() => (settingsReady = true)}
   />
   <p class="status">{status}</p>
+  {#if armed && layout}
+    <KeyLegend keys={layout.keys} held={heldCodes} />
+  {/if}
 {/if}
 
 <style>
