@@ -903,9 +903,18 @@ driver.start()
    `releaseAll()` + disarm + a status line, and re-arm on the reconnect
    counterpart. No need for a rejected-`triggerEvent` fallback. The server
    watchdog remains the safety guarantee; this row is about the UI not lying
-   about being connected.
+   about being connected. Note that `stop()` is the only way to clear the
+   driver's local `held` (so the legend stops lying), and on a dead connection
+   its release calls will reject — `reportOnce` swallows them and that is
+   correct, not a bug. Say so where it happens, or the rejected promises read
+   as one.
 7. Window listeners: `keydown`/`keyup` to the driver, `blur` and `beforeunload` to `releaseAll`, `document` `visibilitychange` to `releaseAll` when `document.hidden`. Return a teardown from the `$effect` that removes them and calls `driver.stop()`, so re-selecting a controller releases under the old keymap before arming the new one.
-8. `heldCodes = [...driver.held]` after every `handleKeyDown`/`handleKeyUp`/`releaseAll`, as `$state`, for the legend highlight. The driver's `held` is a plain `Set` and Svelte does not track it.
+8. `heldCodes = [...driver.held]` as `$state`, for the legend highlight — the
+   driver's `held` is a plain `Set` and Svelte does not track it. There are five
+   call sites that mutate it (keydown, keyup, releaseAll, disconnect, teardown)
+   and forgetting one gives a silently stale legend with no test to catch it, so
+   wrap rather than remember: `const sync = (f) => (...a) => { f(...a); heldCodes = [...driver.held] }`,
+   and register the wrapped handlers.
 9. `reportOnce` keeps the last error message and ignores repeats, so a stuck key cannot spam the status line.
 
 - [ ] **Step 3: Verify it builds and type-checks**
