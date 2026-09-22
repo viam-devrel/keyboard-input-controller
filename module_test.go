@@ -2,6 +2,7 @@ package keyboard
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"go.viam.com/rdk/components/input"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/resource"
 )
 
 func intp(i int) *int { return &i }
@@ -74,6 +76,10 @@ func TestLayoutsCoverEveryAction(t *testing.T) {
 			if !seen[a] {
 				t.Errorf("layout %q missing action %d", name, a)
 			}
+		}
+		if want := int(actEStop) + 1; len(keys) != want {
+			t.Errorf("layout %q has %d entries, want %d (an action is duplicated across codes)",
+				name, len(keys), want)
 		}
 	}
 }
@@ -720,5 +726,105 @@ func TestDepartedSubscriberDropped(t *testing.T) {
 	defer kb.mu.Unlock()
 	if n := len(kb.callbacks[input.AbsoluteHat0Y][input.PositionChangeAbs]); n != 0 {
 		t.Fatalf("departed subscriber still holds %d slot(s)", n)
+	}
+}
+
+func TestActionStringIsStableAndDistinct(t *testing.T) {
+	want := map[action]string{
+		actForward: "forward", actBack: "back", actLeft: "left", actRight: "right",
+		actZDown: "z_down", actZUp: "z_up",
+		actGripClose: "gripper_close", actGripOpen: "gripper_open",
+		actEStop: "stop",
+	}
+	seen := map[string]bool{}
+	for act, name := range want {
+		got := act.String()
+		if got != name {
+			t.Errorf("action %d: got %q, want %q", act, got, name)
+		}
+		if seen[got] {
+			t.Errorf("duplicate action name %q", got)
+		}
+		seen[got] = true
+	}
+	if len(want) != len(layouts["wasd"]) {
+		t.Fatalf("want covers %d actions but a layout has %d; add the new action here",
+			len(want), len(layouts["wasd"]))
+	}
+}
+
+func TestDoCommandGetLayout(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         Config
+		wantLayout  string
+		wantForward string
+		wantTimeout float64
+	}{
+		// Every case sets HoldTimeoutMs explicitly. newTestKB rewrites a nil
+		// HoldTimeoutMs to 0 so unit tests do not start a watchdog goroutine,
+		// so Config{} here would report 0, not the 500 default. The default's
+		// resolution is asserted in TestDoCommandReportsDefaultTimeout below,
+		// which builds the controller directly.
+		{"wasd", Config{HoldTimeoutMs: intp(500)}, "wasd", "KeyW", 500},
+		{"arrows", Config{Layout: "arrows", HoldTimeoutMs: intp(500)}, "arrows", "ArrowUp", 500},
+		{"configured timeout", Config{HoldTimeoutMs: intp(100)}, "wasd", "KeyW", 100},
+		{"watchdog disabled", Config{HoldTimeoutMs: intp(0)}, "wasd", "KeyW", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			kb, _ := newTestKB(t, c.cfg)
+			res, err := kb.DoCommand(context.Background(), map[string]interface{}{"get_layout": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res["layout"] != c.wantLayout {
+				t.Errorf("layout: got %v, want %v", res["layout"], c.wantLayout)
+			}
+			if got := res["hold_timeout_ms"]; got != c.wantTimeout {
+				t.Errorf("hold_timeout_ms: got %v (%T), want %v", got, got, c.wantTimeout)
+			}
+			keys, ok := res["keys"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("keys: got %T, want map[string]interface{}", res["keys"])
+			}
+			if len(keys) != len(layouts[c.wantLayout]) {
+				t.Errorf("keys: got %d entries, want %d", len(keys), len(layouts[c.wantLayout]))
+			}
+			if keys["forward"] != c.wantForward {
+				t.Errorf("keys[forward]: got %v, want %v", keys["forward"], c.wantForward)
+			}
+			if keys["stop"] != "Space" {
+				t.Errorf("keys[stop]: got %v, want Space", keys["stop"])
+			}
+		})
+	}
+}
+
+// The 500ms default cannot be asserted through newTestKB, which forces a nil
+// HoldTimeoutMs to 0. Build the controller directly so the default resolves.
+func TestDoCommandReportsDefaultTimeout(t *testing.T) {
+	ctx := context.Background()
+	k, err := NewInput(ctx, input.Named("kb"), &Config{}, logging.NewTestLogger(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = k.Close(ctx) })
+	res, err := k.DoCommand(ctx, map[string]interface{}{"get_layout": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res["hold_timeout_ms"]; got != float64(500) {
+		t.Errorf("hold_timeout_ms: got %v, want 500", got)
+	}
+}
+
+func TestDoCommandRejectsOtherCommands(t *testing.T) {
+	kb, _ := newTestKB(t, Config{})
+	if _, err := kb.DoCommand(context.Background(), map[string]interface{}{"set_layout": "arrows"}); !errors.Is(err, resource.ErrDoUnimplemented) {
+		t.Fatalf("unknown command: got err %v, want resource.ErrDoUnimplemented", err)
+	}
+	if _, err := kb.DoCommand(context.Background(), map[string]interface{}{}); !errors.Is(err, resource.ErrDoUnimplemented) {
+		t.Fatalf("empty command: got err %v, want resource.ErrDoUnimplemented", err)
 	}
 }

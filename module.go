@@ -83,6 +83,32 @@ const (
 	actEStop
 )
 
+// String is the wire name for an action, used by DoCommand's get_layout so
+// the app can label keys without duplicating the layout table in JS.
+func (a action) String() string {
+	switch a {
+	case actForward:
+		return "forward"
+	case actBack:
+		return "back"
+	case actLeft:
+		return "left"
+	case actRight:
+		return "right"
+	case actZDown:
+		return "z_down"
+	case actZUp:
+		return "z_up"
+	case actGripClose:
+		return "gripper_close"
+	case actGripOpen:
+		return "gripper_open"
+	case actEStop:
+		return "stop"
+	}
+	return fmt.Sprintf("action(%d)", int(a))
+}
+
 // layouts map browser KeyboardEvent.code names to actions. evdev codes are
 // translated to these same names in keyboard_linux.go.
 var layouts = map[string]map[string]action{
@@ -142,6 +168,7 @@ type keyboard struct {
 	resource.AlwaysRebuild
 
 	logger      logging.Logger
+	layout      string            // name of the active layout, reported by DoCommand
 	keys        map[string]action // active layout
 	holdTimeout time.Duration
 
@@ -186,6 +213,7 @@ func NewInput(ctx context.Context, name resource.Name, conf *Config, logger logg
 	k := &keyboard{
 		Named:       name.AsNamed(),
 		logger:      logger,
+		layout:      layout,
 		keys:        keys,
 		holdTimeout: timeout,
 		lastEvents:  map[input.Control]input.Event{},
@@ -519,9 +547,33 @@ func (k *keyboard) triggerEventLocking(ev input.Event) error {
 	return nil
 }
 
-// DoCommand is not implemented.
-func (k *keyboard) DoCommand(context.Context, map[string]interface{}) (map[string]interface{}, error) {
-	return nil, resource.ErrDoUnimplemented
+// DoCommand implements one command, get_layout, which reports the configured
+// layout so a client can render a legend and send exactly the keys this
+// component accepts. It doubles as an identity probe: an input_controller
+// that answers this is a devrel:keyboard:input, which resourceNames() cannot
+// tell a client because it does not report models.
+//
+// No lock: layout, keys and holdTimeout are written only in NewInput, and
+// AlwaysRebuild means the controller is never mutated in place afterwards
+// (a config change gets a whole new keyboard), so they never change under a
+// concurrent read. Anything added above mu in the struct must keep that same
+// write-once property, or this method needs k.mu after all.
+func (k *keyboard) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	if _, ok := cmd["get_layout"]; !ok {
+		return nil, resource.ErrDoUnimplemented
+	}
+	keys := make(map[string]interface{}, len(k.keys))
+	for code, act := range k.keys {
+		keys[act.String()] = code
+	}
+	// float64 because the response crosses a protobuf Struct, where every
+	// number is a double. Returning an int here would still arrive as a
+	// float on the wire; being explicit keeps the tests honest.
+	return map[string]interface{}{
+		"layout":          k.layout,
+		"hold_timeout_ms": float64(k.holdTimeout / time.Millisecond),
+		"keys":            keys,
+	}, nil
 }
 
 // watchdog expires web-held keys that have not been refreshed within holdTimeout.
