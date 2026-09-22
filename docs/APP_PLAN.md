@@ -374,7 +374,7 @@ import App from './App.svelte'
 export default mount(App, { target: document.getElementById('app')! })
 ```
 
-`frontend/src/app.css`: minimal, no framework — a dark page, `system-ui`, a `<kbd>` style carried over from `examples/web/index.html`, a `.held` highlight, a flex column with the settings bar pinned top and the video filling the rest.
+`frontend/src/app.css`: global rules only — `color-scheme: dark`, the page background and foreground, `system-ui`, the `#app` flex column, and the base `<kbd>` rule carried over from `examples/web/index.html`. Nothing that styles markup a later task writes: each component in `src/panels/` brings its own scoped `<style>` block, so no rule here can guess a class name wrong or silently orphan itself.
 
 `frontend/src/App.svelte`: a placeholder `<h1>Keyboard teleop</h1>` for now. Task 5 fills it in.
 
@@ -836,7 +836,7 @@ The first task that produces something runnable end to end. No new unit tests �
 
 - [ ] **Step 1: Write `SettingsBar.svelte`**
 
-Presentational only. Props: `controllers: string[]`, `cameras: string[]`, and bindable `controller`/`camera`. Its root element carries `data-settings` — the attribute the driver keys off, so it must be on the outermost node, not an inner wrapper. The camera select includes a `none` option whose value is `null`.
+Presentational only. Props: `controllers: string[]`, `cameras: string[]`, and bindable `controller`/`camera`. Its root element carries `data-settings` — the attribute the driver keys off, so it must be on the outermost node, not an inner wrapper. Style the bar from its own scoped `<style>` using that same attribute selector rather than inventing a class: one token, so an element that loses the attribute loses its styling too and the break is visible instead of silent. The camera select includes a `none` option whose value is `null`.
 
 - [ ] **Step 2: Wire `App.svelte`**
 
@@ -861,13 +861,13 @@ const driver = createDriver(sink, keys, keepaliveFor(holdTimeoutMs))
 driver.start()
 ```
 
-6. Disconnect handling, which is APP_SPEC's "Connection lost" row: if the
-   installed `@viamrobotics/sdk` exposes a disconnect event on `RobotClient`
-   (`machine.on('disconnect', …)` or similar), wire it to `releaseAll()` +
-   disarm + a status line, and re-arm on its reconnect counterpart. If it does
-   not, treat a rejected `triggerEvent` as the signal and do the same from
-   `reportOnce`. Either way the server watchdog is the safety guarantee; this
-   row is about the UI not lying about being connected.
+6. Disconnect handling, which is APP_SPEC's "Connection lost" row. The
+   installed SDK does expose this — `MachineConnectionEvent.DISCONNECTING` and
+   `DISCONNECTED` in `@viamrobotics/sdk/dist/events.d.ts` — so wire those to
+   `releaseAll()` + disarm + a status line, and re-arm on the reconnect
+   counterpart. No need for a rejected-`triggerEvent` fallback. The server
+   watchdog remains the safety guarantee; this row is about the UI not lying
+   about being connected.
 7. Window listeners: `keydown`/`keyup` to the driver, `blur` and `beforeunload` to `releaseAll`, `document` `visibilitychange` to `releaseAll` when `document.hidden`. Return a teardown from the `$effect` that removes them and calls `driver.stop()`, so re-selecting a controller releases under the old keymap before arming the new one.
 8. `heldCodes = [...driver.held]` after every `handleKeyDown`/`handleKeyUp`/`releaseAll`, as `$state`, for the legend highlight. The driver's `held` is a plain `Set` and Svelte does not track it.
 9. `reportOnce` keeps the last error message and ignores repeats, so a stuck key cannot spam the status line.
@@ -905,7 +905,7 @@ const LABELS: Record<string, string> = {
 }
 ```
 
-Any action in `keys` that is not in `ORDER` renders last with its raw name as the label, so a module that adds an action degrades rather than hides it. A row whose code is in `held` gets the `.held` class.
+Any action in `keys` that is not in `ORDER` renders last with its raw name as the label, so a module that adds an action degrades rather than hides it. A row whose code is in `held` gets the `.held` class, defined in the component's own scoped `<style>` — `app.css` carries only the base `kbd` rule.
 
 - [ ] **Step 2: Render it from `App.svelte`** when armed, passing `heldCodes`.
 
@@ -933,7 +933,11 @@ git commit -m "feat: render the key legend from the component's layout"
 
 Props: `client: RobotClient`, `name: string | null`. An `$effect` keyed on `name`:
 
-- `null` → render a placeholder, start nothing.
+- `null` → render a placeholder, start nothing. Give the placeholder and the
+  `<video>` the same root element (or make both top-level siblings with no
+  wrapper) and size it from CameraView's own scoped `<style>`. A wrapper that
+  appears in only one branch collapses the video to zero height, which reads as
+  a stream bug rather than a layout one.
 - otherwise `new StreamClient(client)` → `getStream(name)` → assign to the `<video bind:this>`'s `srcObject`. The element is `autoplay muted playsinline`; without `muted` the browser blocks autoplay.
 - Teardown (effect cleanup) stops every track and clears `srcObject`.
 - A `visibilitychange` listener tears down on hidden and re-acquires on visible. **Do not skip the re-acquire** — teardown alone leaves the video permanently black after the first tab switch.
@@ -988,7 +992,12 @@ already satisfies make:
 .PHONY: all module lint test setup frontend
 ```
 
-Make `module.tar.gz` depend on `frontend`, and add `frontend/dist` to `TAR_FILES`. Leave `setup:` alone — `frontend:` already runs `npm ci`, and adding it to `setup:` would install twice in the cloud build.
+Make `module.tar.gz` depend on `frontend`, and add `frontend/dist` to `TAR_FILES`.
+
+Keep `npm test` out of the cloud-build path. `build.sh` runs `make module.tar.gz`,
+which must depend on `frontend` only — not on `test` — so Viam's builder never
+installs jsdom and vitest just to produce a tarball. The `test` target stays for
+local and CI use, exactly as the Go `test` target is wired today. Leave `setup:` alone — `frontend:` already runs `npm ci`, and adding it to `setup:` would install twice in the cloud build.
 
 - [ ] **Step 3: Update `meta.json`**
 
