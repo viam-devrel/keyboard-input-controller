@@ -1110,22 +1110,39 @@ Line numbers are from before any edits; re-check them as you go.
 
 Per `docs/APP_SPEC.md` "Testing":
 
-1. `viam module local-app-testing` against a machine with a `devrel:keyboard:input` and a camera. Confirm it connects, the legend matches the configured layout, and held keys highlight.
-2. Hold W, kill the tab → `AbsoluteHat0Y` returns to 0 within `hold_timeout_ms`.
-3. Hold W, alt-tab away → release is immediate, not watchdog-delayed.
-4. Point the controller select at a non-keyboard `input_controller` → the two-cause error, no events sent.
-5. Tab away and back → the camera comes back.
-6. Configure `hold_timeout_ms: 100`, hold W for several seconds → the axis holds at -1 without flickering.
-7. Deploy and open the published app URL. Confirm the cookie path works
-   unchanged from `local-app-testing` — this is the only check that exercises
-   the real Viam app host.
+1. **Open the published app URL first**, before anything else. `vite.config.ts`
+   sets `base: './'`, so `dist/index.html` asks for `./assets/…`. Against
+   `/machine/{id}/` that resolves correctly; against `/machine/{id}` with no
+   trailing slash it resolves one segment too high and you get a blank page
+   with no error text. `machine.ts`'s path parse works either way, so nothing
+   warns you. Everything below is untestable if this fails, which is why it is
+   step 1 and not step 7. If it does fail, check what the app host actually
+   serves before changing `base` — `local-app-testing` and the published host
+   may differ.
+2. `viam module local-app-testing` against a machine with a
+   `devrel:keyboard:input` and a camera. Confirm it connects, the legend
+   matches the configured layout, and held keys highlight.
+3. Hold W, kill the tab → `AbsoluteHat0Y` returns to 0. Allow up to **~1.5×
+   `hold_timeout_ms`**, not 1×: the watchdog ticks at `holdTimeout/2` and
+   expires on `>` the window, so the worst case is 750ms at the default. The
+   `beforeunload` release often beats it, but that is best-effort by design.
+4. Hold W, alt-tab away → release is immediate, not watchdog-delayed.
+5. Point the controller select at a non-keyboard `input_controller` → the
+   two-cause error, no events sent.
+6. Tab away and back → the camera comes back.
+7. Configure `hold_timeout_ms: 100`, hold W for several seconds → the axis
+   holds at -1 without flickering.
 8. **Drop the connection mid-session** — hold W, then kill wifi. Confirm the
    status line stops claiming armed and the keys release. This one cannot be
    trusted from a code read: the plan originally named the wrong SDK events
    here (the enum declares `DISCONNECTED`, but a live drop emits
    `RECONNECTING`), so the whole row was dead code until a review caught it.
+9. **Let it reconnect after step 8 and confirm the video comes back**, not just
+   the keys. `CameraView` and the arming effect recover independently, and a
+   cross-task review found the camera had no reconnect path at all — this step
+   exists to prove the fix.
 
-Record the results. Do not claim this task done on a build alone; steps 2, 3 and 6 are the whole safety argument and none of them are covered by a unit test.
+Record the results. Do not claim this task done on a build alone: steps 3, 4 and 7 are the whole safety argument and no unit test covers any of them.
 
 - [ ] **Step 7: Commit**
 

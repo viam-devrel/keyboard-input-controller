@@ -329,16 +329,24 @@ Unit, Go, in `module_test.go`:
 
 Manual:
 
+`docs/APP_PLAN.md` Task 8 step 6 carries the full ordered procedure; it opens
+with the published app URL, because `base: './'` makes a missing trailing slash
+render a blank page and nothing else is testable until that is ruled out.
+
 1. `viam module local-app-testing` against a machine with a configured
    `devrel:keyboard:input` and a camera. Confirm connect, legend matches the
    configured layout, and held keys highlight.
-2. Hold W, kill the tab. Confirm `AbsoluteHat0Y` returns to 0 within
-   `hold_timeout_ms`.
+2. Hold W, kill the tab. Confirm `AbsoluteHat0Y` returns to 0 within ~1.5×
+   `hold_timeout_ms` — the watchdog ticks at half the window and expires on
+   strictly greater, so 1× is not the real bound.
 3. Hold W, alt-tab away. Confirm release is immediate, not watchdog-delayed.
 4. Point the controller select at a non-keyboard `input_controller`. Confirm
    the "not a devrel:keyboard:input" state and that no events are sent.
 5. Deploy and open the published app URL; confirm the cookie path works
    unchanged from local-app-testing.
+6. Drop the connection mid-session with keys held, then let it reconnect.
+   Confirm both the keys release and the **video** returns — capture and the
+   camera recover through independent paths.
 
 ## Decisions log
 
