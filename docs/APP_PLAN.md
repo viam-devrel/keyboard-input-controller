@@ -764,7 +764,16 @@ git commit -m "feat: add the browser keyboard driver"
 
 - [ ] **Step 1: Write `machine.ts`**
 
-Lift it from `/Users/nick.hehr/src/teach-frames/frontend/src/lib/machine.ts`, dropping the Svelte context helpers (this app has one consumer, `App.svelte`). Keep `currentMachine()`: machine id is `window.location.pathname.split('/')[2]`, credentials come from a JSON cookie keyed by that id, signaling address is `https://app.viam.com:443`, and both missing cases throw with a message worth showing the user. No test — it is a cookie read with no branching worth pinning, and `viam module local-app-testing` exercises it for real in Task 8.
+Lift it from `/Users/nick.hehr/src/teach-frames/frontend/src/lib/machine.ts`, dropping the Svelte context helpers (this app has one consumer, `App.svelte`). Keep `currentMachine()`: machine id is `window.location.pathname.split('/')[2]`, credentials come from a JSON cookie keyed by that id, signaling address is `https://app.viam.com:443`, and both missing cases throw with a message worth showing the user.
+
+Two deliberate divergences from the original, both because Task 5 renders whatever this throws as the entire page:
+
+- **Validate the parsed cookie's shape.** `as MachineCookie` is a compile-time assertion only, so a missing or non-string `hostname` lets `currentMachine()` return successfully with `host: undefined`, and the failure resurfaces at `createRobotClient` — outside the try/catch that wraps this call. Check `hostname` is a string and `credentials` a non-null object, and throw the malformed-cookie error if not.
+- **Make the three throw messages actionable**, each naming a distinct remedy: not opened from the app URL (keep the `/machine/{id}/...` shape hint); not signed in for this machine; stored session damaged, clear site data. Today two of them differ by a single word and none says what to do.
+
+Note both in the file's header comment, so the next person diffing against `teach-frames` is not surprised.
+
+No test — the remaining logic is a cookie read, and `viam module local-app-testing` exercises it for real in Task 8.
 
 - [ ] **Step 2: Write the failing test for `settings.ts`**
 
@@ -780,13 +789,13 @@ describe('settings', () => {
   it('round-trips a selection per machine', () => {
     save('machine-a', { controller: 'keyboard', camera: 'cam' })
     expect(load('machine-a')).toEqual({ controller: 'keyboard', camera: 'cam' })
-    expect(load('machine-b')).toEqual({ controller: null, camera: null })
+    expect(load('machine-b')).toBeNull()
   })
 
   it('survives absent and corrupt storage', () => {
-    expect(load('nope')).toEqual({ controller: null, camera: null })
+    expect(load('nope')).toBeNull()
     localStorage.setItem('keyboard-teleop:bad', '{not json')
-    expect(load('bad')).toEqual({ controller: null, camera: null })
+    expect(load('bad')).toBeNull()
   })
 
   // The typeof guards reject junk *shapes* inside otherwise-valid JSON: a
@@ -826,20 +835,23 @@ export interface Selection {
   camera: string | null
 }
 
-const EMPTY: Selection = { controller: null, camera: null }
 const keyFor = (machineId: string) => `keyboard-teleop:${machineId}`
 
-export function load(machineId: string): Selection {
+// load returns null when there is no usable record for this machine, which is
+// deliberately distinct from a record whose camera is null. Task 5 needs that
+// difference: without it, "no camera" is indistinguishable from "never chose",
+// and the default-to-first rule resurrects the camera on every reload.
+export function load(machineId: string): Selection | null {
   try {
     const raw = localStorage.getItem(keyFor(machineId))
-    if (!raw) return { ...EMPTY }
+    if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<Selection>
     return {
       controller: typeof parsed.controller === 'string' ? parsed.controller : null,
       camera: typeof parsed.camera === 'string' ? parsed.camera : null,
     }
   } catch {
-    return { ...EMPTY }
+    return null
   }
 }
 
@@ -891,7 +903,10 @@ In order:
 
 1. `currentMachine()` in a `try`/`catch`. On throw, render the message as the whole page and stop.
 2. `createRobotClient(dialConf)`, then `machine.resourceNames()`; filter to `subtype === 'input_controller'` and `subtype === 'camera'`, mapping to `.name`.
-3. `resolve()` each against `load(machineId)`, `save()` on every change.
+3. `load(machineId)` once. It returns `null` when this browser has no record, which is what separates "never chose" from "chose no camera":
+   - **controller**: `resolve(saved?.controller ?? null, controllers)`. When `resolve` falls back because the saved name is gone, say so in the status line — "`<saved>` is no longer on this machine, using `<first>`". This matters more than it looks: the `get_layout` probe catches a substitute that is not a keyboard component, but a machine with two of them (`keyboard-base`, `keyboard-arm`) probes clean and the app silently arms the wrong one. The user presses W and a different subsystem moves.
+   - **camera**: honour a record verbatim, including `camera: null` meaning none. Only default to the first camera when `load` returned `null`. Do not run `resolve` on it.
+   - **saving**: write both fields from a single `$effect` over both values, never per-select-handler. `save` takes a whole `Selection`, so a handler that writes one field wipes the other.
 4. `$effect` on the selected controller: build an `InputControllerClient`, call `doCommand({ get_layout: true })`. On success store `{layout, keys, hold_timeout_ms}` and arm. On failure set the error state whose text names both causes — not a `devrel:keyboard:input`, or a module too old to have `get_layout`.
 5. When armed, build the sink and the driver:
 
