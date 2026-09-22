@@ -7,14 +7,14 @@
   } from '@viamrobotics/sdk'
   import { currentMachine, type MachineIdentity } from './lib/machine'
   import { load, resolve, save } from './lib/settings'
-  import { createDriver, keepaliveFor, type Sink } from './lib/driver'
+  import { createDriver, keepaliveFor, type LayoutAction, type Sink } from './lib/driver'
   import SettingsBar from './panels/SettingsBar.svelte'
   import KeyLegend from './panels/KeyLegend.svelte'
   import CameraView from './panels/CameraView.svelte'
 
   interface Layout {
     layout: string
-    keys: Record<string, string>
+    actions: LayoutAction[]
     holdTimeoutMs: number
   }
 
@@ -142,14 +142,14 @@
     void (async () => {
       try {
         const controllerClient = new InputControllerClient(client, selected)
-        const res = (await controllerClient.doCommand({ get_layout: true })) as {
+        const res = (await controllerClient.doCommand({ get_layout: true })) as unknown as {
           layout: string
           hold_timeout_ms: number
-          keys: Record<string, string>
+          actions: LayoutAction[]
         }
         if (cancelled) return
 
-        layout = { layout: res.layout, keys: res.keys, holdTimeoutMs: res.hold_timeout_ms }
+        layout = { layout: res.layout, actions: res.actions, holdTimeoutMs: res.hold_timeout_ms }
 
         // Time is omitted on purpose: the module ignores client clocks.
         // Gated on `armed`: once disconnect or teardown has disarmed capture,
@@ -170,7 +170,7 @@
           release: (code) => send(code, 'ButtonRelease', 0),
           hold: (code) => send(code, 'ButtonHold', 1),
         }
-        const driver = createDriver(sink, res.keys, keepaliveFor(res.hold_timeout_ms))
+        const driver = createDriver(sink, res.actions, keepaliveFor(res.hold_timeout_ms))
 
         // Five call sites mutate driver.held: keydown, keyup, releaseAll,
         // disconnect and teardown below. Wrapping rather than remembering to
@@ -282,7 +282,7 @@
   />
   <p class="status">{status}</p>
   {#if armed && layout}
-    <KeyLegend keys={layout.keys} held={heldCodes} />
+    <KeyLegend actions={layout.actions} held={heldCodes} />
   {/if}
   {#if robotClient}
     <CameraView client={robotClient} name={camera} />

@@ -11,6 +11,7 @@ import (
 	"go.viam.com/rdk/components/input"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func intp(i int) *int { return &i }
@@ -72,7 +73,7 @@ func TestLayoutsCoverEveryAction(t *testing.T) {
 		for _, a := range keys {
 			seen[a] = true
 		}
-		for a := actForward; a <= actEStop; a++ {
+		for a := actHatYNeg; a <= actEStop; a++ {
 			if !seen[a] {
 				t.Errorf("layout %q missing action %d", name, a)
 			}
@@ -291,7 +292,7 @@ func TestConnectSweepReemitsHeld(t *testing.T) {
 // helper, whose own guard would reject an unmapped code before evdevKey's
 // guard is exercised at all). Without evdevKey's own `if act, ok :=
 // k.keys[code]; ok` check, an unmapped code would resolve to the zero-value
-// action, actForward, so an unrecognized keystroke would command forward
+// action, actHatYNeg, so an unrecognized keystroke would command Hat0Y
 // motion.
 func TestEvdevIgnoresUnmappedCode(t *testing.T) {
 	kb, rec := newTestKB(t, Config{Layout: "wasd"})
@@ -376,12 +377,12 @@ func TestHoldIsKeepaliveOnly(t *testing.T) {
 	}
 	_ = web(kb, "KeyW", input.ButtonPress)
 	kb.mu.Lock()
-	before := kb.held[srcWeb][actForward]
+	before := kb.held[srcWeb][actHatYNeg]
 	kb.mu.Unlock()
 	time.Sleep(2 * time.Millisecond)
 	_ = web(kb, "KeyW", input.ButtonHold)
 	kb.mu.Lock()
-	after := kb.held[srcWeb][actForward]
+	after := kb.held[srcWeb][actHatYNeg]
 	kb.mu.Unlock()
 	if !after.After(before) {
 		t.Fatal("Hold did not refresh timestamp")
@@ -448,7 +449,7 @@ func TestRepeatEStopPressDoesNotReclear(t *testing.T) {
 		t.Fatalf("repeat EStop press emitted %d events, want 0: %+v", len(rec.events()), rec.events())
 	}
 	kb.mu.Lock()
-	_, held := kb.held[srcEvdev][actForward]
+	_, held := kb.held[srcEvdev][actHatYNeg]
 	kb.mu.Unlock()
 	if !held {
 		t.Fatal("repeat EStop press incorrectly cleared W")
@@ -731,8 +732,8 @@ func TestDepartedSubscriberDropped(t *testing.T) {
 
 func TestActionStringIsStableAndDistinct(t *testing.T) {
 	want := map[action]string{
-		actForward: "forward", actBack: "back", actLeft: "left", actRight: "right",
-		actZDown: "z_down", actZUp: "z_up",
+		actHatYNeg: "hat_y_neg", actHatYPos: "hat_y_pos", actHatXNeg: "hat_x_neg", actHatXPos: "hat_x_pos",
+		actTriggerLeft: "trigger_left", actTriggerRight: "trigger_right",
 		actGripClose: "gripper_close", actGripOpen: "gripper_open",
 		actEStop: "stop",
 	}
@@ -758,7 +759,7 @@ func TestDoCommandGetLayout(t *testing.T) {
 		name        string
 		cfg         Config
 		wantLayout  string
-		wantForward string
+		wantHatYNeg string
 		wantTimeout float64
 	}{
 		// Every case sets HoldTimeoutMs explicitly. newTestKB rewrites a nil
@@ -784,20 +785,136 @@ func TestDoCommandGetLayout(t *testing.T) {
 			if got := res["hold_timeout_ms"]; got != c.wantTimeout {
 				t.Errorf("hold_timeout_ms: got %v (%T), want %v", got, got, c.wantTimeout)
 			}
-			keys, ok := res["keys"].(map[string]interface{})
+			actions, ok := res["actions"].([]interface{})
 			if !ok {
-				t.Fatalf("keys: got %T, want map[string]interface{}", res["keys"])
+				t.Fatalf("actions: got %T, want []interface{}", res["actions"])
 			}
-			if len(keys) != len(layouts[c.wantLayout]) {
-				t.Errorf("keys: got %d entries, want %d", len(keys), len(layouts[c.wantLayout]))
+			if len(actions) != len(actionControls) {
+				t.Errorf("actions: got %d entries, want %d", len(actions), len(actionControls))
 			}
-			if keys["forward"] != c.wantForward {
-				t.Errorf("keys[forward]: got %v, want %v", keys["forward"], c.wantForward)
+			byName := make(map[string]map[string]interface{}, len(actions))
+			for i, a := range actions {
+				m, ok := a.(map[string]interface{})
+				if !ok {
+					t.Fatalf("actions[%d]: got %T, want map[string]interface{}", i, a)
+				}
+				byName[m["name"].(string)] = m
+				// Legend display order must match actionControls, in order.
+				if want := actionControls[i].act.String(); m["name"] != want {
+					t.Errorf("actions[%d].name: got %v, want %v (order must match actionControls)", i, m["name"], want)
+				}
 			}
-			if keys["stop"] != "Space" {
-				t.Errorf("keys[stop]: got %v, want Space", keys["stop"])
+			hatYNeg := byName["hat_y_neg"]
+			if hatYNeg["code"] != c.wantHatYNeg {
+				t.Errorf("actions[hat_y_neg].code: got %v, want %v", hatYNeg["code"], c.wantHatYNeg)
+			}
+			if hatYNeg["control"] != string(input.AbsoluteHat0Y) {
+				t.Errorf("actions[hat_y_neg].control: got %v, want %v", hatYNeg["control"], input.AbsoluteHat0Y)
+			}
+			if hatYNeg["value"] != -1.0 {
+				t.Errorf("actions[hat_y_neg].value: got %v, want -1", hatYNeg["value"])
+			}
+			stop := byName["stop"]
+			if stop["code"] != "Space" {
+				t.Errorf("actions[stop].code: got %v, want Space", stop["code"])
+			}
+			if stop["control"] != string(input.ButtonEStop) {
+				t.Errorf("actions[stop].control: got %v, want %v", stop["control"], input.ButtonEStop)
 			}
 		})
+	}
+}
+
+// TestDoCommandGetLayoutSurvivesStructpb round-trips the get_layout response
+// through structpb.NewStruct, the same conversion the real gRPC DoCommand
+// call performs. structpb.NewStruct rejects map[string]string and
+// []map[string]string; a unit test on the raw map alone would pass while the
+// real gRPC call failed 100% of the time.
+func TestDoCommandGetLayoutSurvivesStructpb(t *testing.T) {
+	kb, _ := newTestKB(t, Config{HoldTimeoutMs: intp(500)})
+	res, err := kb.DoCommand(context.Background(), map[string]interface{}{"get_layout": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := structpb.NewStruct(res)
+	if err != nil {
+		t.Fatalf("structpb.NewStruct(res) = %v, want nil (the real gRPC call would fail identically)", err)
+	}
+	back := st.AsMap()
+	actions, ok := back["actions"].([]interface{})
+	if !ok {
+		t.Fatalf("round-tripped actions: got %T, want []interface{}", back["actions"])
+	}
+	if len(actions) != len(actionControls) {
+		t.Fatalf("round-tripped actions: got %d entries, want %d", len(actions), len(actionControls))
+	}
+	first, ok := actions[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("round-tripped actions[0]: got %T, want map[string]interface{}", actions[0])
+	}
+	if first["name"] != "hat_y_neg" || first["code"] != "KeyW" || first["control"] != string(input.AbsoluteHat0Y) || first["value"] != -1.0 {
+		t.Errorf("round-tripped actions[0] = %+v, unexpected", first)
+	}
+}
+
+// TestActionControlsCoversEveryActionOnce pins that actionControls cannot
+// drift from controls/buttonControls: every action appears exactly once, and
+// every entry's control/value matches what recomputeLocked and
+// buttonControls actually emit for that action.
+func TestActionControlsCoversEveryActionOnce(t *testing.T) {
+	seen := map[action]bool{}
+	for _, ac := range actionControls {
+		if seen[ac.act] {
+			t.Errorf("action %s appears more than once in actionControls", ac.act)
+		}
+		seen[ac.act] = true
+	}
+	for a := actHatYNeg; a <= actEStop; a++ {
+		if !seen[a] {
+			t.Errorf("action %s missing from actionControls", a)
+		}
+	}
+	if len(seen) != int(actEStop)+1 {
+		t.Errorf("actionControls covers %d actions, want %d", len(seen), int(actEStop)+1)
+	}
+
+	byAct := make(map[action]struct {
+		ctrl  input.Control
+		value float64
+	}, len(actionControls))
+	for _, ac := range actionControls {
+		byAct[ac.act] = struct {
+			ctrl  input.Control
+			value float64
+		}{ac.ctrl, ac.value}
+	}
+	// Hat axes: recomputeLocked emits hatYNeg at Hat0Y=-1, hatYPos at
+	// Hat0Y=+1, hatXNeg at Hat0X=-1, hatXPos at Hat0X=+1.
+	hatWant := map[action]struct {
+		ctrl  input.Control
+		value float64
+	}{
+		actHatYNeg: {input.AbsoluteHat0Y, -1},
+		actHatYPos: {input.AbsoluteHat0Y, 1},
+		actHatXNeg: {input.AbsoluteHat0X, -1},
+		actHatXPos: {input.AbsoluteHat0X, 1},
+	}
+	for act, want := range hatWant {
+		got, ok := byAct[act]
+		if !ok || got != want {
+			t.Errorf("actionControls[%s] = %+v, want %+v", act, got, want)
+		}
+	}
+	// Buttons: every buttonControls entry emits ctrl=1 when held.
+	for _, bc := range buttonControls {
+		got, ok := byAct[bc.act]
+		want := struct {
+			ctrl  input.Control
+			value float64
+		}{bc.ctrl, 1}
+		if !ok || got != want {
+			t.Errorf("actionControls[%s] = %+v, want %+v (buttonControls)", bc.act, got, want)
+		}
 	}
 }
 

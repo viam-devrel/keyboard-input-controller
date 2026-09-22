@@ -68,16 +68,24 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
-// action is what a key means. Controls are derived from which actions are held.
+// action is what a key means. Controls are derived from which actions are
+// held.
+//
+// These names describe the control a key drives, never a physical
+// direction: this module has no idea which reference frame a consumer (e.g.
+// arm-remote-control) maps its controls onto, so a name claiming "forward"
+// or a vertical "up" would be a guess the module cannot back up.
+// gripper_open/close and stop are the exceptions, kept semantic because a
+// gripper opens and closes, and a stop stops, in any frame.
 type action int
 
 const (
-	actForward action = iota
-	actBack
-	actLeft
-	actRight
-	actZDown
-	actZUp
+	actHatYNeg action = iota
+	actHatYPos
+	actHatXNeg
+	actHatXPos
+	actTriggerLeft
+	actTriggerRight
 	actGripClose
 	actGripOpen
 	actEStop
@@ -87,18 +95,18 @@ const (
 // the app can label keys without duplicating the layout table in JS.
 func (a action) String() string {
 	switch a {
-	case actForward:
-		return "forward"
-	case actBack:
-		return "back"
-	case actLeft:
-		return "left"
-	case actRight:
-		return "right"
-	case actZDown:
-		return "z_down"
-	case actZUp:
-		return "z_up"
+	case actHatYNeg:
+		return "hat_y_neg"
+	case actHatYPos:
+		return "hat_y_pos"
+	case actHatXNeg:
+		return "hat_x_neg"
+	case actHatXPos:
+		return "hat_x_pos"
+	case actTriggerLeft:
+		return "trigger_left"
+	case actTriggerRight:
+		return "trigger_right"
 	case actGripClose:
 		return "gripper_close"
 	case actGripOpen:
@@ -113,28 +121,28 @@ func (a action) String() string {
 // translated to these same names in keyboard_linux.go.
 var layouts = map[string]map[string]action{
 	"wasd": {
-		"KeyW": actForward, "KeyS": actBack, "KeyA": actLeft, "KeyD": actRight,
-		"KeyQ": actZDown, "KeyE": actZUp, "KeyZ": actGripClose, "KeyC": actGripOpen,
+		"KeyW": actHatYNeg, "KeyS": actHatYPos, "KeyA": actHatXNeg, "KeyD": actHatXPos,
+		"KeyQ": actTriggerLeft, "KeyE": actTriggerRight, "KeyZ": actGripClose, "KeyC": actGripOpen,
 		"Space": actEStop,
 	},
 	"arrows": {
-		"ArrowUp": actForward, "ArrowDown": actBack, "ArrowLeft": actLeft, "ArrowRight": actRight,
-		"ShiftLeft": actZDown, "ShiftRight": actZUp, "ControlLeft": actGripClose, "ControlRight": actGripOpen,
+		"ArrowUp": actHatYNeg, "ArrowDown": actHatYPos, "ArrowLeft": actHatXNeg, "ArrowRight": actHatXPos,
+		"ShiftLeft": actTriggerLeft, "ShiftRight": actTriggerRight, "ControlLeft": actGripClose, "ControlRight": actGripOpen,
 		"Space": actEStop,
 	},
 }
 
 // buttonControls are the actions that map 1:1 to a button control, in a
-// fixed emission order. Hat axes are synthesized from the forward/back and
-// left/right pairs. The order matters: recomputeLocked emits in this order
-// so that on an EStop clear-all, ButtonEStop's press is always emitted last,
-// after every other button's release and the hat axes have gone out.
+// fixed emission order. Hat axes are synthesized from the hatYNeg/hatYPos and
+// hatXNeg/hatXPos pairs. The order matters: recomputeLocked emits in this
+// order so that on an EStop clear-all, ButtonEStop's press is always emitted
+// last, after every other button's release and the hat axes have gone out.
 var buttonControls = []struct {
 	act  action
 	ctrl input.Control
 }{
-	{actZDown, input.ButtonLT},
-	{actZUp, input.ButtonRT},
+	{actTriggerLeft, input.ButtonLT},
+	{actTriggerRight, input.ButtonRT},
 	{actGripClose, input.ButtonWest},
 	{actGripOpen, input.ButtonEast},
 	{actEStop, input.ButtonEStop},
@@ -144,6 +152,28 @@ var buttonControls = []struct {
 var controls = []input.Control{
 	input.AbsoluteHat0X, input.AbsoluteHat0Y,
 	input.ButtonLT, input.ButtonRT, input.ButtonWest, input.ButtonEast, input.ButtonEStop,
+}
+
+// actionControls describes every action in legend display order: the control
+// a consumer actually receives when that key is held, and the value it
+// carries. This is the only frame-independent thing the module can tell a
+// client — it has no idea which reference frame the consumer maps these onto,
+// so it deliberately says nothing about physical direction. DoCommand's
+// get_layout reports exactly this table so the app can label from it.
+var actionControls = []struct {
+	act   action
+	ctrl  input.Control
+	value float64
+}{
+	{actHatYNeg, input.AbsoluteHat0Y, -1},
+	{actHatYPos, input.AbsoluteHat0Y, 1},
+	{actHatXNeg, input.AbsoluteHat0X, -1},
+	{actHatXPos, input.AbsoluteHat0X, 1},
+	{actTriggerLeft, input.ButtonLT, 1},
+	{actTriggerRight, input.ButtonRT, 1},
+	{actGripClose, input.ButtonWest, 1},
+	{actGripOpen, input.ButtonEast, 1},
+	{actEStop, input.ButtonEStop, 1},
 }
 
 // subscriber is one registered callback. Each streaming consumer registers
@@ -292,8 +322,8 @@ func boolToFloat(b bool) float64 {
 // the last event of the recompute, after both axes are zeroed and every
 // other button's release goes out. Caller holds k.mu.
 func (k *keyboard) recomputeLocked(at time.Time) {
-	k.setLocked(input.AbsoluteHat0Y, boolToFloat(k.isHeldLocked(actBack))-boolToFloat(k.isHeldLocked(actForward)), at)
-	k.setLocked(input.AbsoluteHat0X, boolToFloat(k.isHeldLocked(actRight))-boolToFloat(k.isHeldLocked(actLeft)), at)
+	k.setLocked(input.AbsoluteHat0Y, boolToFloat(k.isHeldLocked(actHatYPos))-boolToFloat(k.isHeldLocked(actHatYNeg)), at)
+	k.setLocked(input.AbsoluteHat0X, boolToFloat(k.isHeldLocked(actHatXPos))-boolToFloat(k.isHeldLocked(actHatXNeg)), at)
 	for _, bc := range buttonControls {
 		k.setLocked(bc.ctrl, boolToFloat(k.isHeldLocked(bc.act)), at)
 	}
@@ -562,17 +592,29 @@ func (k *keyboard) DoCommand(_ context.Context, cmd map[string]interface{}) (map
 	if _, ok := cmd["get_layout"]; !ok {
 		return nil, resource.ErrDoUnimplemented
 	}
-	keys := make(map[string]interface{}, len(k.keys))
+	codeForAct := make(map[action]string, len(k.keys))
 	for code, act := range k.keys {
-		keys[act.String()] = code
+		codeForAct[act] = code
 	}
-	// float64 because the response crosses a protobuf Struct, where every
-	// number is a double. Returning an int here would still arrive as a
-	// float on the wire; being explicit keeps the tests honest.
+	// []interface{} of map[string]interface{}, not []map[string]string:
+	// structpb.NewStruct (what this response crosses on the way out) rejects
+	// both a map[string]string value and a []map[string]string slice. value
+	// is float64 because the response crosses a protobuf Struct, where every
+	// number is a double; returning ac.value (already a float64) keeps that
+	// explicit rather than relying on an implicit conversion.
+	actions := make([]interface{}, 0, len(actionControls))
+	for _, ac := range actionControls {
+		actions = append(actions, map[string]interface{}{
+			"name":    ac.act.String(),
+			"code":    codeForAct[ac.act],
+			"control": string(ac.ctrl),
+			"value":   ac.value,
+		})
+	}
 	return map[string]interface{}{
 		"layout":          k.layout,
 		"hold_timeout_ms": float64(k.holdTimeout / time.Millisecond),
-		"keys":            keys,
+		"actions":         actions,
 	}, nil
 }
 

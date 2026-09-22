@@ -40,26 +40,45 @@ Request: any map containing the key `get_layout`. Response:
 {
   "layout": "wasd",
   "hold_timeout_ms": 500,
-  "keys": {
-    "forward": "KeyW", "back": "KeyS", "left": "KeyA", "right": "KeyD",
-    "z_down": "KeyQ", "z_up": "KeyE",
-    "gripper_close": "KeyZ", "gripper_open": "KeyC",
-    "stop": "Space"
-  }
+  "actions": [
+    {"name": "hat_y_neg", "code": "KeyW", "control": "AbsoluteHat0Y", "value": -1},
+    {"name": "hat_y_pos", "code": "KeyS", "control": "AbsoluteHat0Y", "value": 1},
+    {"name": "hat_x_neg", "code": "KeyA", "control": "AbsoluteHat0X", "value": -1},
+    {"name": "hat_x_pos", "code": "KeyD", "control": "AbsoluteHat0X", "value": 1},
+    {"name": "trigger_left", "code": "KeyQ", "control": "ButtonLT", "value": 1},
+    {"name": "trigger_right", "code": "KeyE", "control": "ButtonRT", "value": 1},
+    {"name": "gripper_close", "code": "KeyZ", "control": "ButtonWest", "value": 1},
+    {"name": "gripper_open", "code": "KeyC", "control": "ButtonEast", "value": 1},
+    {"name": "stop", "code": "Space", "control": "ButtonEStop", "value": 1}
+  ]
 }
 ```
 
-`keys` is the module's `layouts[layout]` map inverted: action name to
-`KeyboardEvent.code`. Action names are a new `String()` on the existing
-`action` type, so the two representations cannot drift. `hold_timeout_ms` is
-the component's resolved watchdog window in milliseconds (`0` when disabled),
+`actions` is `module.go`'s `actionControls` table rendered against the active
+layout, in that table's fixed order: for each action, the `KeyboardEvent.code`
+that drives it (from `layouts[layout]`), the `input.Control` a consumer
+actually receives while it's held, and the value that control carries. This
+is deliberately not "forward" or vertical-axis language. The
+module emits gamepad-style controls that a consumer like
+`hipsterbrown:arm-remote-control` maps onto its own configured reference
+frame — the module has no idea which frame that is, so naming a physical
+direction here would be a guess it cannot back up (this is why the previous
+vertical-axis action names collided with an arm/gripper frame where Z is
+forward/back, not vertical, in real testing). `gripper_open`/`gripper_close`
+and `stop` are the exceptions,
+named semantically because they mean the same thing in any frame. Response
+values cross `structpb.NewStruct`, which rejects `map[string]string` and
+`[]map[string]string`; `actions` is built as `[]interface{}` of
+`map[string]interface{}` and `value` as `float64` for exactly that reason
+(see the comment in `module.go`'s `DoCommand`). `hold_timeout_ms` is the
+component's resolved watchdog window in milliseconds (`0` when disabled),
 which the app needs to pick a keepalive interval — see `lib/driver.ts`. Any
 other command returns `resource.ErrDoUnimplemented` as today.
 
-This splits ownership cleanly: the module owns key-to-meaning, the app owns
-presentation. The app hardcodes display order and human labels for the nine
-known action names and falls back to rendering the raw action name for any it
-does not recognise, so a module that adds an action does not break an older app.
+This splits ownership cleanly: the module owns key-to-control, the app owns
+presentation. The app labels each row from its `control` (and signed `value`
+for axes), falling back to the raw control name for anything it does not
+recognise, so a module that adds an action does not break an older app.
 
 `DoCommand` is also the app's identity probe. An `input_controller` that
 answers is a `devrel:keyboard:input`; one that errors is not, and the app says
@@ -142,7 +161,14 @@ interface Sink {
   hold(code: string): void
 }
 
-createDriver(sink: Sink, keys: Record<string, string>, keepaliveMs: number): {
+interface LayoutAction {
+  name: string
+  code: string
+  control: string
+  value: number
+}
+
+createDriver(sink: Sink, actions: LayoutAction[], keepaliveMs: number): {
   handleKeyDown(e: KeyboardEvent): void
   handleKeyUp(e: KeyboardEvent): void
   releaseAll(): void
@@ -152,10 +178,13 @@ createDriver(sink: Sink, keys: Record<string, string>, keepaliveMs: number): {
 }
 ```
 
-`keys` is the `get_layout` response's map verbatim (action name to code). The
-driver derives its own mapped-code set from the values and reads `keys.stop` for
-the EStop branch below, so the legend and the capture set come from one object
-and the driver stays drivable from `vitest` with no Svelte in scope.
+`actions` is the `get_layout` response's `actions` array verbatim. The driver
+derives its own mapped-code set from `actions.map(a => a.code)` and finds the
+stop code by control, not by name — `actions.find(a => a.control ===
+'ButtonEStop')?.code` — so the driver depends on the one frame-independent
+control the module emits, not on any action-name vocabulary. This keeps the
+legend and the capture set coming from one object, and the driver stays
+drivable from `vitest` with no Svelte in scope.
 
 Behaviour, matching `docs/SPEC.md`'s contract:
 
@@ -192,7 +221,7 @@ server-side (`docs/SPEC.md`, "Held-key state"), so after Space the module holds
 nothing while the app's local `held` set still lists every physically-down key.
 The legend would keep highlighting them, and the keepalives would be ignored.
 `handleKeyDown` therefore clears the local set the same way the module does: on
-a press of `keys.stop`, `held` is emptied and the stop code re-added, and
+a press of the stop code, `held` is emptied and the stop code re-added, and
 `sink.press(stopCode)` is sent as for any other key — but no `release` calls,
 since the module already zeroed everything. The existing repeat/already-held
 guard runs first, so a held-down Space is a local no-op, mirroring the module's
@@ -232,10 +261,17 @@ is an implementation-time question; if it does, use it, otherwise drive
 
 ### Key legend
 
-Rendered from the `get_layout` response in a fixed display order (forward,
-back, left, right, z_up, z_down, gripper_open, gripper_close, stop), each row
-showing the human label and the `<kbd>` for its code. A held code is
-highlighted, which doubles as the "is this thing on" indicator.
+Rendered from the `get_layout` response's `actions` array, in the order the
+module sends them (module.go's `actionControls`, so there is no client-side
+order to keep in sync). Each row shows a label derived from the action's
+`control` and `value` (a lookup table keyed by e.g. `AbsoluteHat0Y:-1`, with
+the raw control name as the fallback for anything unrecognised), the `<kbd>`
+for its code, and what it emits — the control name, with a signed value
+appended only for axis controls (buttons are press/release, so a `+1` there
+is noise). A held code is highlighted, which doubles as the "is this thing
+on" indicator. Below the list, a muted line reminds the operator that which
+way each axis moves depends on the reference frame their consumer is
+configured for — the module cannot tell them that part.
 
 ## States and errors
 
@@ -322,7 +358,15 @@ Unit, `vitest`, on `lib/driver.ts` with a fake sink and fake timers:
 Unit, Go, in `module_test.go`:
 
 - `DoCommand({"get_layout": true})` under `wasd` and under `arrows` returns
-  that layout's name and the full nine-entry inverted map.
+  that layout's name and the full nine-entry `actions` array, in
+  `actionControls` order, with each entry's code, control and value correct.
+- The `get_layout` response round-trips through `structpb.NewStruct` without
+  error — a unit test on the raw map alone would pass while the real gRPC call
+  failed, since `structpb.NewStruct` rejects `map[string]string` and
+  `[]map[string]string`.
+- `actionControls` covers every action exactly once, and each entry's control
+  and value match what `recomputeLocked`/`buttonControls` actually emit for
+  that action.
 - The reported `hold_timeout_ms` is the resolved value: the 500 default when
   unset, the configured value when set, and 0 when the watchdog is disabled.
 - `DoCommand` with any other command returns `resource.ErrDoUnimplemented`.

@@ -35,15 +35,21 @@ Design details: `docs/SPEC.md`.
 
 | Control | `wasd` | `arrows` | Value |
 |---|---|---|---|
-| `AbsoluteHat0Y` | W / S | ↑ / ↓ | -1 forward, +1 back |
-| `AbsoluteHat0X` | A / D | ← / → | -1 left, +1 right |
-| `ButtonLT` | Q | Left Shift | Z down |
-| `ButtonRT` | E | Right Shift | Z up |
+| `AbsoluteHat0Y` | W / S | ↑ / ↓ | -1 `hat_y_neg`, +1 `hat_y_pos` |
+| `AbsoluteHat0X` | A / D | ← / → | -1 `hat_x_neg`, +1 `hat_x_pos` |
+| `ButtonLT` | Q | Left Shift | `trigger_left` |
+| `ButtonRT` | E | Right Shift | `trigger_right` |
 | `ButtonWest` | Z | Left Ctrl | gripper close (emitted; not consumed by `arm-remote-control`) |
 | `ButtonEast` | C | Right Ctrl | gripper open (emitted; not consumed by `arm-remote-control`) |
 | `ButtonEStop` | Space | Space | releases every held key |
 
 Axes are digital (-1, 0, +1). Opposite keys held together give 0.
+
+These names describe the control a key drives, never a physical direction:
+the module has no idea which reference frame a consumer (e.g.
+`arm-remote-control`) maps its controls onto, so it cannot honestly claim
+"forward" or "up". `gripper_open`/`gripper_close` and `stop` are the
+exceptions, kept semantic because they mean the same thing in any frame.
 
 With `hipsterbrown:arm-remote-control`, only `AbsoluteHat0X/Y` and
 `ButtonLT/RT` are consumed. Space does not call `arm.Stop()`: releasing
@@ -106,7 +112,11 @@ the new layout.
 ### DoCommand
 
 `get_layout`: returns the component's layout name, resolved
-`hold_timeout_ms`, and the `layout`'s key map inverted (action name to
-`KeyboardEvent.code`). See `docs/APP_SPEC.md` "Module change: `DoCommand`"
-for the exact request/response shape. Any other command returns
-`resource.ErrDoUnimplemented`.
+`hold_timeout_ms`, and an `actions` array — for each action, the key that
+drives it, the `input.Control` a consumer receives while it's held, and the
+value that control carries. It reports controls rather than physical
+directions on purpose: the module has no idea which reference frame the
+consumer maps those controls onto, so it cannot honestly claim "forward" or
+"up" — see the "Controls" table above. See `docs/APP_SPEC.md` "Module
+change: `DoCommand`" for the exact request/response shape. Any other command
+returns `resource.ErrDoUnimplemented`.

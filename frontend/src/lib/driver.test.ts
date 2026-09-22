@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createDriver, keepaliveFor, type Sink } from './driver'
+import { createDriver, keepaliveFor, type LayoutAction, type Sink } from './driver'
 
-const KEYS = {
-  forward: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD',
-  z_down: 'KeyQ', z_up: 'KeyE',
-  gripper_close: 'KeyZ', gripper_open: 'KeyC',
-  stop: 'Space',
-}
+const KEYS: LayoutAction[] = [
+  { name: 'hat_y_neg', code: 'KeyW', control: 'AbsoluteHat0Y', value: -1 },
+  { name: 'hat_y_pos', code: 'KeyS', control: 'AbsoluteHat0Y', value: 1 },
+  { name: 'hat_x_neg', code: 'KeyA', control: 'AbsoluteHat0X', value: -1 },
+  { name: 'hat_x_pos', code: 'KeyD', control: 'AbsoluteHat0X', value: 1 },
+  { name: 'trigger_left', code: 'KeyQ', control: 'ButtonLT', value: 1 },
+  { name: 'trigger_right', code: 'KeyE', control: 'ButtonRT', value: 1 },
+  { name: 'gripper_close', code: 'KeyZ', control: 'ButtonWest', value: 1 },
+  { name: 'gripper_open', code: 'KeyC', control: 'ButtonEast', value: 1 },
+  { name: 'stop', code: 'Space', control: 'ButtonEStop', value: 1 },
+]
 
 function fakeSink() {
   const calls: string[] = []

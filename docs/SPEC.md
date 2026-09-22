@@ -56,13 +56,23 @@ timeouts below 50ms. No dependencies.
 
 | Control | Type | Value |
 |---|---|---|
-| `AbsoluteHat0Y` | axis | -1 forward, +1 back, 0 neither or both |
-| `AbsoluteHat0X` | axis | -1 left, +1 right, 0 neither or both |
-| `ButtonLT` | button | Z down |
-| `ButtonRT` | button | Z up |
+| `AbsoluteHat0Y` | axis | -1 `hat_y_neg`, +1 `hat_y_pos`, 0 neither or both |
+| `AbsoluteHat0X` | axis | -1 `hat_x_neg`, +1 `hat_x_pos`, 0 neither or both |
+| `ButtonLT` | button | `trigger_left` |
+| `ButtonRT` | button | `trigger_right` |
 | `ButtonWest` | button | gripper close |
 | `ButtonEast` | button | gripper open |
 | `ButtonEStop` | button | stop |
+
+Names like `hat_y_neg`/`trigger_left` describe the control a key drives, never
+a physical direction: this module has no idea which reference frame a
+consumer (e.g. `arm-remote-control`) maps its controls onto, so "forward" or
+a vertical "up"/"down" would be a guess the module cannot back up — and in
+the arm/gripper frame that motivated this module, Z is the forward/back
+axis, not vertical, so the previous vertical-axis names collided head-on
+with the consumer's own Z meaning.
+`gripper_open`/`gripper_close` and `stop` are the exceptions: a gripper opens
+and closes, and a stop stops, in any frame, so those stay semantic.
 
 Axis events use `PositionChangeAbs`. Button events use `ButtonPress` and
 `ButtonRelease`. `ButtonHold` is never emitted outbound (it is accepted
@@ -84,17 +94,17 @@ for watchdog releases, device-loss releases, `Connect`, and `Disconnect`.
 Keys are identified by browser `KeyboardEvent.code` strings. This is the
 canonical key name for both sources; evdev codes are translated to it.
 
-| Meaning | `wasd` | `arrows` | evdev constant (wasd / arrows) |
+| Action | `wasd` | `arrows` | evdev constant (wasd / arrows) |
 |---|---|---|---|
-| forward (Hat0Y -1) | `KeyW` | `ArrowUp` | `KeyW` / `KeyUp` |
-| back (Hat0Y +1) | `KeyS` | `ArrowDown` | `KeyS` / `KeyDown` |
-| left (Hat0X -1) | `KeyA` | `ArrowLeft` | `KeyA` / `KeyLeft` |
-| right (Hat0X +1) | `KeyD` | `ArrowRight` | `KeyD` / `KeyRight` |
-| Z down (`ButtonLT`) | `KeyQ` | `ShiftLeft` | `KeyQ` / `KeyLeftShift` |
-| Z up (`ButtonRT`) | `KeyE` | `ShiftRight` | `KeyE` / `KeyRightShift` |
-| gripper close (`ButtonWest`) | `KeyZ` | `ControlLeft` | `KeyZ` / `KeyLeftCtrl` |
-| gripper open (`ButtonEast`) | `KeyC` | `ControlRight` | `KeyC` / `KeyRightCtrl` |
-| stop (`ButtonEStop`) | `Space` | `Space` | `KeySpace` |
+| `hat_y_neg` (Hat0Y -1) | `KeyW` | `ArrowUp` | `KeyW` / `KeyUp` |
+| `hat_y_pos` (Hat0Y +1) | `KeyS` | `ArrowDown` | `KeyS` / `KeyDown` |
+| `hat_x_neg` (Hat0X -1) | `KeyA` | `ArrowLeft` | `KeyA` / `KeyLeft` |
+| `hat_x_pos` (Hat0X +1) | `KeyD` | `ArrowRight` | `KeyD` / `KeyRight` |
+| `trigger_left` (`ButtonLT`) | `KeyQ` | `ShiftLeft` | `KeyQ` / `KeyLeftShift` |
+| `trigger_right` (`ButtonRT`) | `KeyE` | `ShiftRight` | `KeyE` / `KeyRightShift` |
+| `gripper_close` (`ButtonWest`) | `KeyZ` | `ControlLeft` | `KeyZ` / `KeyLeftCtrl` |
+| `gripper_open` (`ButtonEast`) | `KeyC` | `ControlRight` | `KeyC` / `KeyRightCtrl` |
+| `stop` (`ButtonEStop`) | `Space` | `Space` | `KeySpace` |
 
 The `arrows` layout follows LeRobot `KeyboardEndEffectorTeleop` with two
 deliberate differences. LeRobot maps Left to +X and Right to -X; we keep
@@ -115,8 +125,8 @@ is in either set:
 
 ```
 held(k) = k in evdevHeld || k in webHeld
-hat0y   = (held[back]  ? 1 : 0) - (held[forward] ? 1 : 0)
-hat0x   = (held[right] ? 1 : 0) - (held[left]    ? 1 : 0)
+hat0y   = held(hatYPos) - held(hatYNeg)
+hat0x   = held(hatXPos) - held(hatXNeg)
 button  = held[key] ? 1 : 0
 ```
 
@@ -372,8 +382,8 @@ Existing scaffold issues fixed along the way: `module.go` uses `fmt` and
 Unit (`go test ./...`), no hardware:
 
 - Each layout maps every key in the table to the expected control and sign.
-- Forward + back held yields `Hat0Y = 0`; releasing one yields the other's
-  sign.
+- `hat_y_neg` + `hat_y_pos` held yields `Hat0Y = 0`; releasing one yields the
+  other's sign.
 - Repeated press of a held key emits nothing.
 - W held via evdev and via web, web releases: `Hat0Y` stays -1. evdev
   releases too: `Hat0Y` goes to 0.

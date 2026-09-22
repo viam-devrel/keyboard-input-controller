@@ -15,6 +15,16 @@ export interface Sink {
   hold(code: string): void
 }
 
+// LayoutAction is one entry of the module's get_layout `actions` array: the
+// key that drives it, the input.Control it emits, and the value that control
+// carries while held. See docs/SPEC.md and docs/APP_SPEC.md.
+export interface LayoutAction {
+  name: string
+  code: string
+  control: string
+  value: number
+}
+
 export interface Driver {
   handleKeyDown(e: KeyboardEvent): void
   handleKeyUp(e: KeyboardEvent): void
@@ -45,19 +55,22 @@ export function keepaliveFor(holdTimeoutMs: number): number {
   return Math.min(MAX_KEEPALIVE_MS, Math.max(MIN_KEEPALIVE_MS, third))
 }
 
-// keys is the get_layout response's map, action name to KeyboardEvent.code.
-// Taking the whole map rather than a bare set of codes is what lets the driver
+// actions is the get_layout response's `actions` array verbatim. Taking the
+// whole array rather than a bare set of codes is what lets the driver
 // recognise the stop key without a second source of truth.
 export function createDriver(
   sink: Sink,
-  keys: Record<string, string>,
+  actions: LayoutAction[],
   keepaliveMs: number,
 ): Driver {
-  const codes = new Set(Object.values(keys))
-  // A layout without a `stop` action leaves this undefined and the EStop
+  const codes = new Set(actions.map((a) => a.code))
+  // Found by control, not by name: the module's action names are vocabulary
+  // this driver should not need to know, but ButtonEStop is the one control
+  // whose meaning ("stop") is frame-independent and safe to depend on. A
+  // layout without an EStop action leaves this undefined and the EStop
   // branch below inert (e.code === undefined never matches a real code) —
   // that is deliberate, not a bug to "fix" into a loose compare.
-  const stopCode = keys.stop
+  const stopCode = actions.find((a) => a.control === 'ButtonEStop')?.code
   const held = new Set<string>()
   let timer: ReturnType<typeof setInterval> | undefined
 
