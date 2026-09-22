@@ -19,11 +19,14 @@ export interface Driver {
   handleKeyDown(e: KeyboardEvent): void
   handleKeyUp(e: KeyboardEvent): void
   releaseAll(): void
-  start(): void
-  stop(): void
+  start(): void   // begins the keepalive interval
+  stop(): void    // stops it and releases everything
   readonly held: ReadonlySet<string>
 }
 
+// The floor is also the fan-out ceiling: at 20ms with a 9-key layout that is
+// ~450 fire-and-forget triggerEvent calls per second with no backpressure,
+// which is why it is not set any lower.
 const MIN_KEEPALIVE_MS = 20
 const MAX_KEEPALIVE_MS = 200
 
@@ -46,6 +49,9 @@ export function createDriver(
   keepaliveMs: number,
 ): Driver {
   const codes = new Set(Object.values(keys))
+  // A layout without a `stop` action leaves this undefined and the EStop
+  // branch below inert (e.code === undefined never matches a real code) —
+  // that is deliberate, not a bug to "fix" into a loose compare.
   const stopCode = keys.stop
   const held = new Set<string>()
   let timer: ReturnType<typeof setInterval> | undefined
@@ -63,8 +69,12 @@ export function createDriver(
     held,
 
     handleKeyDown(e) {
-      if (!codes.has(e.code) || inSettings(e)) return
-      e.preventDefault()
+      if (!codes.has(e.code)) return   // unmapped: leave the browser alone
+      if (inSettings(e)) return        // typing in the settings bar must not drive the robot
+      e.preventDefault()               // after the settings guard: see handleKeyUp
+      // Before the EStop clear below: after an EStop, the OS keeps autorepeating a
+      // physically-down key that is no longer in `held`, and this is the only guard
+      // left to stop it re-pressing the axis the EStop just zeroed.
       if (e.repeat || held.has(e.code)) return
       // Mirrors the module: EStop zeroes everything, then re-inserts itself.
       // No releases go out, because the module already emitted them.
@@ -80,8 +90,10 @@ export function createDriver(
       // so Space still activates a focused control.
       if (!inSettings(e)) e.preventDefault()
       // Unconditional: a release for a key the module is not holding is a
-      // no-op server-side, and sending it anyway recovers from a lost press
-      // or from the EStop clear above.
+      // no-op server-side, and sending it anyway covers the EStop clear above
+      // and a driver rebuilt on controller change, whose predecessor's stop()
+      // releases failed and left the server holding keys this driver's empty
+      // `held` knows nothing about.
       held.delete(e.code)
       sink.release(e.code)
     },

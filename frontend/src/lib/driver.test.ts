@@ -26,7 +26,7 @@ function ev(code: string, opts: { repeat?: boolean; target?: EventTarget | null 
   return {
     code,
     repeat: opts.repeat ?? false,
-    target: opts.target ?? null,
+    target: opts.target ?? document.body,
     preventDefault() { prevented = true },
     get defaultPrevented() { return prevented },
   } as unknown as KeyboardEvent
@@ -104,6 +104,14 @@ describe('createDriver', () => {
     expect(e.defaultPrevented).toBe(false)
   })
 
+  it('drives the robot from a focused element outside the settings bar', () => {
+    const { sink, calls } = fakeSink()
+    const d = createDriver(sink, KEYS, 200)
+    settingsTarget()                        // bar exists but is not the target
+    d.handleKeyDown(ev('KeyW', { target: document.body }))
+    expect(calls).toEqual(['press:KeyW'])
+  })
+
   it('still releases a key whose keyup lands in the settings bar', () => {
     const { sink, calls } = fakeSink()
     const d = createDriver(sink, KEYS, 200)
@@ -166,6 +174,16 @@ describe('createDriver', () => {
     d.handleKeyDown(ev('Space'))
     expect(calls).toEqual(['press:Space'])
     expect([...d.held]).toEqual(['Space'])
+  })
+
+  it('releases a key the EStop already cleared from held', () => {
+    const { sink, calls } = fakeSink()
+    const d = createDriver(sink, KEYS, 200)
+    d.handleKeyDown(ev('KeyW'))
+    d.handleKeyDown(ev('Space'))
+    calls.length = 0
+    d.handleKeyUp(ev('KeyW'))
+    expect(calls).toEqual(['release:KeyW'])
   })
 
   // The OS keeps autorepeating a physically-down key after an EStop cleared it
