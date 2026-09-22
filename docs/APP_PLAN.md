@@ -12,11 +12,13 @@
 
 ---
 
-## Deviation from the spec, flag before starting
+## Dependencies
 
-`docs/APP_SPEC.md` lists `@viamrobotics/svelte-sdk` as a dependency, copying `teach-frames`. This plan drops it and uses `@viamrobotics/sdk` directly. `teach-frames` needs its reactive `createResourceClient` because many components deep in a tree each want their own client; this app has one machine, one controller client and one stream, all owned by `App.svelte`. Dropping it also drops `@tanstack/svelte-query`.
-
-If you want the spec's version instead, say so before Task 2 and the plan changes in exactly one place: `App.svelte` wraps the tree in `ViamProvider` and gets clients from `createResourceClient` rather than constructing them.
+`@viamrobotics/sdk` and `js-cookie`, no `@viamrobotics/svelte-sdk`. `teach-frames`
+needs its reactive `createResourceClient` because many components deep in a tree
+each want their own client; here `App.svelte` owns the one machine, the one
+controller client and the one stream. `docs/APP_SPEC.md` agrees — nothing to
+decide.
 
 ---
 
