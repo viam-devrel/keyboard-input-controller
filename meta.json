@@ -11,13 +11,25 @@
       "markdown_link": "README.md#model-devrelkeyboardinput"
     }
   ],
-  "applications": null,
+  "applications": [
+    {
+      "name": "keyboard-teleop",
+      "type": "single_machine",
+      "entrypoint": "frontend/dist/index.html",
+      "customizations": {
+        "machinePicker": {
+          "heading": "Keyboard teleop",
+          "subheading": "Sign in and pick the machine you want to drive"
+        }
+      }
+    }
+  ],
   "markdown_link": "README.md",
   "entrypoint": "bin/keyboard",
   "first_run": "",
   "build": {
-    "build": "make module.tar.gz",
-    "setup": "make setup",
+    "build": "./build.sh",
+    "setup": "./setup.sh",
     "path": "module.tar.gz",
     "arch": [
       "linux/amd64",

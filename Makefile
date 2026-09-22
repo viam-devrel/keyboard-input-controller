@@ -1,4 +1,6 @@
 
+.PHONY: all module lint test setup frontend
+
 GO_BUILD_ENV :=
 GO_BUILD_FLAGS :=
 MODULE_BINARY := bin/keyboard
@@ -21,14 +23,18 @@ update:
 
 test:
 	go test ./...
+	cd frontend && npm test
+
+frontend:
+	cd frontend && npm ci && npm run build
 
 FIRST_RUN := $(shell jq -r '.first_run // empty' meta.json 2>/dev/null)
-TAR_FILES := meta.json $(MODULE_BINARY)
+TAR_FILES := meta.json $(MODULE_BINARY) frontend/dist
 ifneq ($(FIRST_RUN),)
 TAR_FILES += $(FIRST_RUN)
 endif
 
-module.tar.gz: meta.json $(MODULE_BINARY)
+module.tar.gz: meta.json $(MODULE_BINARY) frontend
 ifneq ($(VIAM_TARGET_OS), windows)
 	strip $(MODULE_BINARY)
 endif

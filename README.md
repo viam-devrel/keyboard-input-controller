@@ -83,12 +83,19 @@ Any Viam TypeScript SDK client can be a keyboard. Send raw browser
 The module ignores client timestamps. If keepalives stop for
 `hold_timeout_ms`, the key is released server-side.
 
-`TriggerEvent` rejects keys outside the configured layout, so the page's
-layout selector must match the module's `layout` attribute.
+`TriggerEvent` rejects keys outside the configured layout; the shipped app
+reads the layout automatically via `get_layout` (see below), so there is no
+layout selector to keep in sync by hand.
 
-A ready-made page is in `examples/web/index.html`. Open it, enter the
-machine host and an API key, click Connect, and hold keys.
+A ready-made application ships with this module: the "keyboard-teleop" Viam
+application, registered in `meta.json` and built from `frontend/`. Open it
+from the machine's Viam app page, pick the `devrel:keyboard:input` component
+and a camera, and hold keys. Design: `docs/APP_SPEC.md`.
 
 ### DoCommand
 
-Not implemented.
+`get_layout`: returns the component's layout name, resolved
+`hold_timeout_ms`, and the `layout`'s key map inverted (action name to
+`KeyboardEvent.code`). See `docs/APP_SPEC.md` "Module change: `DoCommand`"
+for the exact request/response shape. Any other command returns
+`resource.ErrDoUnimplemented`.

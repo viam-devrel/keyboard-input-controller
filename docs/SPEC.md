@@ -273,7 +273,10 @@ tick mid-recompute deadlocks `Close`), and before returning clears both
 held sets and runs the recompute so consumers see zeroed axes. `Poll` uses
 a 1s read deadline, so `Close` may take up to about a second to unblock
 the evdev worker; that is expected. Do not close the device from `Close`
-to speed this up, it races the worker's handle. `DoCommand` returns `resource.ErrDoUnimplemented`.
+to speed this up, it races the worker's handle. `DoCommand` handles the
+`get_layout` command; see `docs/APP_SPEC.md` "Module change: `DoCommand`" for
+the request/response shape. Any other command returns
+`resource.ErrDoUnimplemented`.
 
 ## Web client contract
 
@@ -283,7 +286,10 @@ Any TypeScript SDK client is a valid keyboard. The contract:
   local `held` set, send `ButtonPress`.
 - `keyup` for a mapped code: `preventDefault()`, remove from `held`, send
   `ButtonRelease`.
-- Every 200ms: send `ButtonHold` for each code in `held`.
+- Every 200ms: send `ButtonHold` for each code in `held`. This figure assumes
+  the default `hold_timeout_ms` (500); a client should scale its keepalive
+  interval to the configured window rather than hardcode 200ms (the shipped
+  app derives it via `keepaliveFor` in `frontend/src/lib/driver.ts`).
 - On `blur`, `visibilitychange` (to hidden), and `beforeunload`: send
   `ButtonRelease` for each held code and clear the set.
 
@@ -324,6 +330,8 @@ addEventListener("keyup", (e) => {
   e.preventDefault();
   held.delete(e.code); send(e.code, "ButtonRelease", 0);
 });
+// 200ms assumes the default hold_timeout_ms; scale to the configured window
+// (see `keepaliveFor` in frontend/src/lib/driver.ts) rather than hardcoding it.
 setInterval(() => held.forEach((c) => send(c, "ButtonHold", 1)), 200);
 const releaseAll = () => { held.forEach((c) => send(c, "ButtonRelease", 0)); held.clear(); };
 addEventListener("blur", releaseAll);
@@ -335,9 +343,11 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) relea
 itself sends only the keys of the layout selected in its form, since
 `TriggerEvent` rejects keys outside the module's configured layout.
 
-Ships as `examples/web/index.html`: one static file, `<script type="module">`
-importing the SDK from an ESM CDN (esm.sh), with text inputs for host, API
-key ID, and API key, and a Connect button. No build step.
+Shipped as the `frontend/` app: a Svelte app bundled in the module and
+registered as a Viam application (`docs/APP_SPEC.md`), which connects using
+the machine identity from the Viam app cookie rather than manually entered
+host/API key fields. This raw contract remains the reference for anyone
+writing their own client.
 
 ## Files
 
@@ -348,7 +358,8 @@ key ID, and API key, and a Connect button. No build step.
 | `keyboard_other.go` | stub for non-Linux |
 | `module_test.go` | mapping, axis synthesis, watchdog, device-loss release |
 | `keyboard_linux_test.go` | evdev key translation and decode (`//go:build linux`) |
-| `examples/web/index.html` | test page |
+| `frontend/` | Svelte app bundled as the shipped web client, driven by `get_layout` |
+| `docs/APP_SPEC.md` | Design for the bundled `frontend/` application |
 | `README.md` | config table, device setup, `grab` tradeoff, web usage |
 
 Existing scaffold issues fixed along the way: `module.go` uses `fmt` and
@@ -386,8 +397,9 @@ Manual:
    `dev_file`, hold W, confirm `Events()` in the app shows `AbsoluteHat0Y = -1`.
 2. Unplug the keyboard while holding W, confirm `AbsoluteHat0Y` returns to 0
    and `Disconnect` appears.
-3. Open `examples/web/index.html` against the same machine, hold W, kill the
-   tab, confirm `AbsoluteHat0Y` returns to 0 within `hold_timeout_ms`.
+3. Open the `frontend/` app (`docs/APP_SPEC.md`) against the same machine,
+   hold W, kill the tab, confirm `AbsoluteHat0Y` returns to 0 within
+   `hold_timeout_ms`.
 4. Configure `arm-remote-control` with `input_controller: "keyboard"`, drive
    the arm from both sources.
 
