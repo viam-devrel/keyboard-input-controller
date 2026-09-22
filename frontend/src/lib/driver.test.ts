@@ -168,6 +168,42 @@ describe('createDriver', () => {
     expect([...d.held]).toEqual(['Space'])
   })
 
+  // The OS keeps autorepeating a physically-down key after an EStop cleared it
+  // from `held`. That is the one state where `held.has()` does NOT shadow
+  // `e.repeat`, so the repeat guard is the only thing stopping the driver from
+  // re-pressing W and silently resuming the axis the EStop just zeroed.
+  it('does not resurrect an autorepeating key that EStop cleared', () => {
+    const { sink, calls } = fakeSink()
+    const d = createDriver(sink, KEYS, 200)
+    d.handleKeyDown(ev('KeyW'))
+    d.handleKeyDown(ev('Space'))
+    calls.length = 0
+    d.handleKeyDown(ev('KeyW', { repeat: true }))
+    expect(calls).toEqual([])
+    expect([...d.held]).toEqual(['Space'])
+  })
+
+  // The existing stop() test cannot see a leaked interval, because releaseAll
+  // empties `held` first and an orphaned timer over an empty set emits nothing.
+  // Re-pressing after stop() is what makes the leak observable.
+  it('stop really clears the interval, and start is idempotent', () => {
+    vi.useFakeTimers()
+    const { sink, calls } = fakeSink()
+    const d = createDriver(sink, KEYS, 200)
+    d.start()
+    d.start()
+    d.handleKeyDown(ev('KeyW'))
+    calls.length = 0
+    vi.advanceTimersByTime(200)
+    expect(calls).toEqual(['hold:KeyW']) // one interval, not two
+    d.stop()
+    d.handleKeyDown(ev('KeyW'))
+    calls.length = 0
+    vi.advanceTimersByTime(1000)
+    expect(calls).toEqual([]) // nothing still ticking
+    vi.useRealTimers()
+  })
+
   it('a repeat EStop press is a no-op', () => {
     const { sink, calls } = fakeSink()
     const d = createDriver(sink, KEYS, 200)
