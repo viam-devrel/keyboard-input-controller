@@ -10,18 +10,23 @@
     cameras,
     controller = $bindable(),
     camera = $bindable(),
+    onchange,
   }: {
     controllers: string[]
     cameras: string[]
     controller: string | null
     camera: string | null
+    // Fired only for a real user edit to either select, distinct from
+    // App.svelte applying a default — that distinction is what lets settings
+    // stay unsaved until the user actually chooses something.
+    onchange: () => void
   } = $props()
 </script>
 
 <div data-settings>
   <label>
     Controller
-    <select bind:value={controller}>
+    <select bind:value={controller} onchange={() => onchange()}>
       {#each controllers as name (name)}
         <option value={name}>{name}</option>
       {/each}
@@ -29,7 +34,7 @@
   </label>
   <label>
     Camera
-    <select bind:value={camera}>
+    <select bind:value={camera} onchange={() => onchange()}>
       <option value={null}>none</option>
       {#each cameras as name (name)}
         <option value={name}>{name}</option>
