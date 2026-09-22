@@ -1,0 +1,68 @@
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.4 system-ui, sans-serif;
+  background: #111;
+  color: #eee;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.settings-bar {
+  flex: none;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: .5rem 1rem;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+}
+
+.settings-bar select {
+  font: inherit;
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: .25rem;
+  padding: .3rem .5rem;
+}
+
+video {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+kbd {
+  display: inline-block;
+  padding: .1rem .4rem;
+  border: 1px solid #666;
+  border-radius: .25rem;
+  margin: .1rem;
+  font-family: monospace;
+  background: #222;
+  color: #eee;
+}
+
+kbd.held {
+  background: #2d6a4f;
+  border-color: #40916c;
+  color: #fff;
+}
+
+#status {
+  flex: none;
+  padding: .5rem 1rem;
+  font-family: monospace;
+  background: #1a1a1a;
+  border-top: 1px solid #333;
+}
