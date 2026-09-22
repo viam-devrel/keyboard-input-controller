@@ -10,7 +10,7 @@
   import { createDriver, keepaliveFor, type Sink } from './lib/driver'
   import SettingsBar from './panels/SettingsBar.svelte'
   import KeyLegend from './panels/KeyLegend.svelte'
-  // Task 7 adds <CameraView client={robotClient} name={camera} /> here.
+  import CameraView from './panels/CameraView.svelte'
 
   interface Layout {
     layout: string
@@ -274,6 +274,9 @@
   <p class="status">{status}</p>
   {#if armed && layout}
     <KeyLegend keys={layout.keys} held={heldCodes} />
+  {/if}
+  {#if robotClient}
+    <CameraView client={robotClient} name={camera} />
   {/if}
 {/if}
 
