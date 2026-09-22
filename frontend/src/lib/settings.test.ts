@@ -7,13 +7,13 @@ describe('settings', () => {
   it('round-trips a selection per machine', () => {
     save('machine-a', { controller: 'keyboard', camera: 'cam' })
     expect(load('machine-a')).toEqual({ controller: 'keyboard', camera: 'cam' })
-    expect(load('machine-b')).toEqual({ controller: null, camera: null })
+    expect(load('machine-b')).toBeNull()
   })
 
   it('survives absent and corrupt storage', () => {
-    expect(load('nope')).toEqual({ controller: null, camera: null })
+    expect(load('nope')).toBeNull()
     localStorage.setItem('keyboard-teleop:bad', '{not json')
-    expect(load('bad')).toEqual({ controller: null, camera: null })
+    expect(load('bad')).toBeNull()
   })
 
   // The typeof guards reject junk *shapes* inside otherwise-valid JSON: a

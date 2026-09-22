@@ -7,20 +7,23 @@ export interface Selection {
   camera: string | null
 }
 
-const EMPTY: Selection = { controller: null, camera: null }
 const keyFor = (machineId: string) => `keyboard-teleop:${machineId}`
 
-export function load(machineId: string): Selection {
+// load returns null when there is no usable record for this machine, which is
+// deliberately distinct from a record whose camera is null. Task 5 needs that
+// difference: without it, "no camera" is indistinguishable from "never chose",
+// and the default-to-first rule resurrects the camera on every reload.
+export function load(machineId: string): Selection | null {
   try {
     const raw = localStorage.getItem(keyFor(machineId))
-    if (!raw) return { ...EMPTY }
+    if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<Selection>
     return {
       controller: typeof parsed.controller === 'string' ? parsed.controller : null,
       camera: typeof parsed.camera === 'string' ? parsed.camera : null,
     }
   } catch {
-    return { ...EMPTY }
+    return null
   }
 }
 
