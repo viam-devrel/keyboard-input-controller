@@ -2,12 +2,14 @@
   "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "devrel:keyboard",
   "visibility": "public",
-  "url": "",
+  "url": "https://github.com/viam-devrel/keyboard-input-controller",
   "description": "Maps keyboard keys to the same gamepad-style controls an input_controller emits, from a local evdev keyboard or a browser page.",
   "models": [
-    { "api": "rdk:component:input_controller",
+    {
+      "api": "rdk:component:input_controller",
       "model": "devrel:keyboard:input",
-      "markdown_link": "README.md#model-devrelkeyboardinput" }
+      "markdown_link": "README.md#model-devrelkeyboardinput"
+    }
   ],
   "applications": null,
   "markdown_link": "README.md",
@@ -23,6 +25,8 @@
       "linux/arm",
       "darwin/arm64"
     ],
-    "darwin_deps": ["go"]
+    "darwin_deps": [
+      "go"
+    ]
   }
 }
